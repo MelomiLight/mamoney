@@ -13,7 +13,14 @@ const today = () => ymd(new Date());
 const icon = (name, cls = '') =>
   `<svg class="i ${cls}" viewBox="0 0 24 24">${ICONS[name] || ICONS['circle-dollar-sign']}</svg>`;
 
-const fmt = n => (n < 0 ? '−' : '') + Math.round(Math.abs(n)).toLocaleString('en-US') + ' ₸';
+// exact amounts: tiyn shown only when present (1,500 ₸ / 1,500.50 ₸)
+const fmt = n => {
+  const a = Math.round(Math.abs(n) * 100) / 100;
+  const frac = Math.round(a * 100) % 100 !== 0;
+  return (n < 0 && a ? '−' : '') + a.toLocaleString('en-US', { minimumFractionDigits: frac ? 2 : 0, maximumFractionDigits: 2 }) + ' ₸';
+};
+// computed guidance (limits, averages): whole tenge
+const fmt0 = n => fmt(n < 0 ? -Math.floor(-n) : Math.floor(n));
 const compact = n => {
   const a = Math.abs(n);
   if (a >= 1e6) return (n / 1e6).toFixed(a >= 1e7 ? 1 : 2).replace(/\.?0+$/, '') + 'M';
@@ -345,12 +352,12 @@ function planCard() {
   const pct = p.limit > 0 ? Math.min(100, (p.spentToday / p.limit) * 100) : 100;
   let note;
   if (p.free <= 0) note = `You're short ${fmt(-p.free)} for ${p.unpaid.length ? 'bills' : 'your reserve'} until ${shortDate(p.end)}.`;
-  else if (over && p.tomorrow !== null) note = `Over by ${fmt(-p.leftToday)} — tomorrow's limit drops to ${fmt(p.tomorrow)}.`;
-  else note = `${fmt(p.limit)} a day · ${p.daysLeft} day${p.daysLeft > 1 ? 's' : ''} to payday (${shortDate(p.end)})`;
+  else if (over && p.tomorrow !== null) note = `Over by ${fmt0(-p.leftToday)} — tomorrow's limit drops to ${fmt0(p.tomorrow)}.`;
+  else note = `${fmt0(p.limit)} a day · ${p.daysLeft} day${p.daysLeft > 1 ? 's' : ''} to payday (${shortDate(p.end)})`;
   return `<section class="sec plan" data-act="plan">
     <div class="plan-top">
       <div><div class="plan-label">${over ? 'Over today’s limit' : 'Safe to spend today'}</div>
-      <div class="plan-big ${over || p.free <= 0 ? 'neg' : 'ok'}">${fmt(over ? -p.leftToday : p.leftToday)}</div></div>
+      <div class="plan-big ${over || p.free <= 0 ? 'neg' : 'ok'}">${fmt0(over ? -p.leftToday : p.leftToday)}</div></div>
       <div class="plan-right"><span>Until ${shortDate(p.end)}</span><b>${fmt(Math.max(0, p.free))}</b></div>
     </div>
     <div class="bar plan-bar ${over ? 'over' : ''}"><i style="width:${pct}%"></i></div>
@@ -451,9 +458,9 @@ function openPlan() {
       ${row('Free to spend', `<span style="color:${info.free < 0 ? 'var(--neg)' : 'inherit'}">${fmt(info.free)}</span>`)}
       ${row('Spent this period', fmt(info.spentPeriod))}
       ${row('Days left (incl. today)', info.daysLeft)}
-      ${row('Today’s limit', fmt(info.limit))}
+      ${row('Today’s limit', fmt0(info.limit))}
       ${row('Spent today', fmt(info.spentToday))}
-      ${info.tomorrow !== null ? row('Tomorrow’s limit (if no more spending)', fmt(info.tomorrow)) : ''}
+      ${info.tomorrow !== null ? row('Tomorrow’s limit (if no more spending)', fmt0(info.tomorrow)) : ''}
       <p class="set-note" style="padding:10px 0 0">Every morning the limit is recalculated: (money − unpaid bills − reserve) ÷ days until payday. Spend less today and tomorrow’s limit grows; spend more and it shrinks.</p>` : ''}
     ${billsBlock(info)}
     <div class="label">Settings</div>
@@ -759,7 +766,7 @@ function openTx(o) {
   const autoBill = () => {
     if (!fBill || billTouched) return;
     const amt = parseAmount(fAmt.value);
-    const m = bills.find(b => b.cat === fTo.value && b.amount === amt);
+    const m = bills.find(b => b.cat === fTo.value && Math.round(b.amount * 100) === Math.round(amt * 100));
     fBill.value = m ? m.id : '';
   };
   if (fBill) fBill.onchange = () => (billTouched = true);
@@ -1069,7 +1076,7 @@ function dailyChart(txs) {
   });
   const ay = yOf(avg);
   s += `<line x1="${L}" x2="${W}" y1="${ay}" y2="${ay}" stroke="var(--text-2)" stroke-width="1.5" stroke-dasharray="4 3" pointer-events="none"/>`;
-  return `<div class="card"><h4>Daily spending</h4><div class="csub">Average ${fmt(avg)} per day (dashed line)</div>
+  return `<div class="card"><h4>Daily spending</h4><div class="csub">Average ${fmt0(avg)} per day (dashed line)</div>
     <svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Spending per day">${s}</svg></div>`;
 }
 
@@ -1148,7 +1155,7 @@ function renderAnalytics() {
       <div class="kpi"><span>Income</span><b style="color:var(--pos)">${fmt(s.totalInc)}</b></div>
       <div class="kpi"><span>Expenses</span><b>${fmt(s.totalExp)}</b></div>
       <div class="kpi"><span>Saved</span><b style="color:${net < 0 ? 'var(--neg)' : 'var(--text)'}">${fmt(net)}</b></div>
-      <div class="kpi"><span>Avg per day</span><b>${fmt(days ? s.totalExp / days : 0)}</b></div>
+      <div class="kpi"><span>Avg per day</span><b>${fmt0(days ? s.totalExp / days : 0)}</b></div>
     </div>
     ${catBlock}
     ${P.mode === 'month' ? dailyChart(txs) : ''}
