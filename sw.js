@@ -1,5 +1,5 @@
 // Bump VERSION after every change so phones pick up the new files.
-const VERSION = 'v1';
+const VERSION = 'v3';
 const FILES = ['./', 'index.html', 'styles.css', 'app.js', 'icons.js', 'manifest.webmanifest',
   'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 
@@ -17,7 +17,7 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET' || new URL(e.request.url).origin !== location.origin) return;
   e.respondWith(
-    fetch(e.request)
+    fetch(e.request, { cache: 'no-cache' }) // revalidate, never serve a stale app.js from the HTTP cache
       .then(res => {
         const copy = res.clone();
         caches.open(VERSION).then(c => c.put(e.request, copy));

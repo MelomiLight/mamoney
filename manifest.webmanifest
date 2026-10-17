@@ -1,6 +1,6 @@
 {
-  "name": "Money Tracker",
-  "short_name": "Money",
+  "name": "Деньги — учёт расходов",
+  "short_name": "Деньги",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
