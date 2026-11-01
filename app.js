@@ -1611,6 +1611,7 @@ function renderSettings() {
     <div class="set-list">
       <button class="set-row" data-act="export">${icon('download')}Сохранить копию<small>${S.tx.length} ${plural(S.tx.length, ['запись', 'записи', 'записей'])}</small></button>
       <button class="set-row" data-act="import">${icon('upload')}Восстановить из копии</button>
+      <button class="set-row" data-act="import-csv">${icon('upload')}Импорт из BudgetOK<small>CSV</small></button>
     </div>
     <div class="set-note ${stale ? 'warn' : ''}">
       ${last ? `Последняя копия: ${dayLabel(last.slice(0, 10)).toLowerCase()}.` : 'Копий ещё не было.'}
@@ -1678,6 +1679,153 @@ $('#import-file').addEventListener('change', e => {
 });
 
 /* =========================================================
+   Import from BudgetOK (its CSV export)
+   ========================================================= */
+// Quoted fields may contain the separator, doubled quotes and line breaks.
+function parseCSV(text) {
+  text = text.replace(/^﻿/, '');
+  const first = text.slice(0, text.search(/\r?\n|$/));
+  const sep = (first.match(/;/g) || []).length >= (first.match(/,/g) || []).length ? ';' : ',';
+  const rows = [];
+  let row = [], f = '', q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) {
+      if (c !== '"') f += c;
+      else if (text[i + 1] === '"') { f += '"'; i++; }
+      else q = false;
+    } else if (c === '"') q = true;
+    else if (c === sep) { row.push(f); f = ''; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && text[i + 1] === '\n') i++;
+      row.push(f); rows.push(row); row = []; f = '';
+    } else f += c;
+  }
+  if (f || row.length) { row.push(f); rows.push(row); }
+  return rows.filter(r => r.some(x => x.trim()));
+}
+
+const BOK_ICONS = [
+  [/еда|продукт|магазин/, 'shopping-cart'], [/кафе|ресторан|кофе/, 'coffee'], [/транспорт|такси|бензин|авто/, 'bus'],
+  [/подар/, 'gift'], [/развлеч|отдых|кино/, 'gamepad-2'], [/рассроч|кредит|ипотек/, 'percent'],
+  [/дом|квартир|аренд|коммунал/, 'house'], [/долг/, 'hand-coins'], [/подписк/, 'repeat'],
+  [/связь|телефон|интернет/, 'smartphone'], [/накоп|сбереж|депозит/, 'piggy-bank'], [/здоров|аптек|врач/, 'heart-pulse'],
+  [/одежд|обув/, 'shirt'], [/спорт|зал/, 'dumbbell'], [/учеб|образов|курс/, 'graduation-cap'],
+  [/зарплат|аванс/, 'briefcase'], [/наличн/, 'banknote'],
+];
+const BOK_TYPES = { 'расход': 'expense', 'доход': 'income', 'перевод': 'transfer' };
+const lowerRu = s => String(s || '').trim().toLowerCase().replace(/ё/g, 'е');
+
+// Turn a BudgetOK export into a merged copy of S. Nothing is changed until the caller swaps it in.
+function budgetOKImport(text) {
+  const rows = parseCSV(text);
+  const head = (rows.shift() || []).map(lowerRu);
+  const col = n => head.indexOf(n);
+  const C = { type: col('тип операции'), date: col('дата'), wallet: col('кошелек'), cat: col('категория'), sub: col('подкатегория'),
+    amount: col('сумма'), cur: col('валюта'), amount2: col('сумма_dop'), cur2: col('валюта_dop'), note: col('комментарий') };
+  if ([C.type, C.date, C.wallet, C.cat, C.amount].some(i => i < 0)) throw new Error('format');
+
+  const d = JSON.parse(JSON.stringify(S));
+  const fresh = !d.tx.length;
+  const made = { income: 0, wallet: 0, category: 0 };
+  const get = (r, i) => (i < 0 ? '' : String(r[i] ?? '').replace(/\s+/g, ' ').trim());
+  const item = (kind, name) => {
+    const list = d[LISTS[kind]];
+    let it = list.find(x => lowerRu(x.name) === lowerRu(name));
+    if (!it) {
+      const ln = lowerRu(name);
+      const ic = BOK_ICONS.find(([re]) => re.test(ln))?.[1];
+      it = { id: uid(), name, icon: ic || { income: 'hand-coins', wallet: 'credit-card', category: 'circle-dollar-sign' }[kind],
+        color: COLORS[(list.length * 5 + 3) % COLORS.length] };
+      if (kind === 'wallet') it.initial = 0;
+      if (kind === 'category') it.budget = 0;
+      list.push(it);
+      made[kind]++;
+    }
+    return it.id;
+  };
+  const money = s => parseFloat(String(s).replace(/[\s ]/g, '').replace(',', '.'));
+  const isTenge = c => !c || /₸|kzt|тг|тенге/i.test(c);
+  const toYmd = s => {
+    let m = s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})/);
+    if (m) return `${m[3]}-${pad(m[2])}-${pad(m[1])}`;
+    m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    return m ? m[0] : null;
+  };
+
+  const seen = new Set(d.tx.map(t => t.imp).filter(Boolean));
+  const repeats = {};
+  const out = [];
+  let skipped = 0, dup = 0;
+  rows.forEach(r => {
+    const type = BOK_TYPES[lowerRu(get(r, C.type))];
+    const date = toYmd(get(r, C.date));
+    const wallet = get(r, C.wallet), cat = get(r, C.cat), sub = get(r, C.sub), note = get(r, C.note);
+    // amounts in another currency: take the copy converted to tenge, if the export has one
+    let amount = money(get(r, C.amount));
+    if (!isTenge(get(r, C.cur)) && isTenge(get(r, C.cur2)) && get(r, C.amount2)) amount = money(get(r, C.amount2));
+    if (!type || !date || !wallet || !cat || !(amount > 0)) { skipped++; return; }
+
+    // same row twice in one file is two real operations; the same file twice is not
+    const base = ['bok', type, date, wallet, cat, sub, amount, note].join('|');
+    repeats[base] = (repeats[base] || 0) + 1;
+    const imp = base + '|' + repeats[base];
+    if (seen.has(imp)) { dup++; return; }
+
+    const t = { id: uid(), type, amount: Math.round(amount * 100) / 100, date, sub: '', note, imp };
+    if (type === 'income') { t.from = item('income', cat); t.to = item('wallet', wallet); }
+    else if (type === 'transfer') { t.from = item('wallet', wallet); t.to = item('wallet', cat); }
+    else { t.from = item('wallet', wallet); t.to = item('category', cat); t.sub = sub || note; t.note = sub ? note : ''; }
+    out.push(t);
+  });
+
+  // ts only orders records within one day; BudgetOK lists a day's operations in the order they were made
+  const now = Date.now() - out.length;
+  out.forEach((t, i) => (t.ts = now + i));
+  d.tx.push(...out);
+
+  // a brand-new app still holds the sample wallets and categories: drop the ones nothing uses
+  if (fresh && out.length) {
+    const used = new Set([...d.tx.flatMap(t => [t.from, t.to]), ...d.quick.flatMap(q => [q.from, q.to]),
+      ...d.plan.bills.flatMap(b => [b.cat, b.wallet]), ...d.plan.exclude]);
+    for (const k of Object.values(LISTS)) d[k] = d[k].filter(x => used.has(x.id));
+  }
+
+  const dates = out.map(t => t.date).sort();
+  const n = type => out.filter(t => t.type === type).length;
+  return { d, added: out.length, dup, skipped, made, from: dates[0], to: dates[dates.length - 1],
+    counts: { expense: n('expense'), income: n('income'), transfer: n('transfer') } };
+}
+
+$('#import-csv').addEventListener('change', e => {
+  const f = e.target.files[0];
+  e.target.value = '';
+  if (!f) return;
+  const r = new FileReader();
+  r.onload = () => {
+    let res;
+    try { res = budgetOKImport(r.result); } catch (err) { return toast('Это не похоже на выгрузку BudgetOK'); }
+    if (!res.added) return toast(res.dup ? 'Все эти записи уже импортированы' : 'В файле не нашлось операций');
+    const dm = s => s.split('-').reverse().join('.');
+    const c = res.counts, m = res.made;
+    const lines = [
+      `${res.added} ${plural(res.added, ['запись', 'записи', 'записей'])} за ${dm(res.from)} – ${dm(res.to)}:`,
+      `расходов ${c.expense}, доходов ${c.income}, переводов ${c.transfer}.`,
+      m.wallet + m.category + m.income ? `\nНовые: кошельков ${m.wallet}, категорий ${m.category}, источников дохода ${m.income}.` : '',
+      res.dup ? `Уже были и будут пропущены: ${res.dup}.` : '',
+      res.skipped ? `Не удалось разобрать строк: ${res.skipped}.` : '',
+    ];
+    if (!confirm(`Импортировать из BudgetOK?\n\n${lines.filter(Boolean).join('\n')}`)) return;
+    const undo = snapshot();
+    S = res.d;
+    save();
+    render();
+    toast('Импорт готов. Сверьте балансы кошельков с банком', undo);
+  };
+  r.readAsText(f);
+});
+
+/* =========================================================
    Global events
    ========================================================= */
 let toastTimer;
@@ -1713,6 +1861,7 @@ const ACTIONS = {
   cat: el => { UI.openCat = UI.openCat === el.dataset.id ? null : el.dataset.id; render(); },
   export: exportData,
   import: () => $('#import-file').click(),
+  'import-csv': () => $('#import-csv').click(),
   reset: () => {
     if (!confirm('Стереть ВСЕ данные?\n\nСовет: сначала сохраните копию.')) return;
     const undo = snapshot();
