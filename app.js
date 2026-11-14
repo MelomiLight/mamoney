@@ -57,7 +57,7 @@ const COLORS = ['#ef4444', '#f97316', '#f59e0b', '#eab308', '#84cc16', '#22c55e'
   '#d946ef', '#ec4899', '#f43f5e', '#a16207', '#78716c', '#64748b', '#334155'];
 
 const UI_ICONS = new Set(['plus', 'x', 'chevron-left', 'chevron-right', 'list', 'chart-pie', 'settings',
-  'arrow-down-wide-narrow', 'arrow-up-narrow-wide', 'arrow-right', 'trash-2', 'download', 'upload', 'check', 'search', 'arrow-down']);
+  'arrow-down-wide-narrow', 'arrow-up-narrow-wide', 'arrow-right', 'trash-2', 'download', 'upload', 'check', 'search', 'arrow-down', 'mic', 'key-round']);
 const PICKER_ICONS = Object.keys(ICONS).filter(n => !UI_ICONS.has(n));
 
 /* kinds: income source → wallet → category.
@@ -436,7 +436,7 @@ const goalMonth = ym => { const [y, m] = ym.split('-').map(Number); return `${MO
 function depCard(w, bal, top) {
   const pct = w.goalAmount > 0 ? Math.min(1, Math.max(0, bal / w.goalAmount)) : null;
   const monthly = w.rate > 0 && bal > 0 ? (bal * w.rate) / 100 / 12 : 0;
-  return `<button class="tile dep" data-kind="wallet" data-id="${w.id}" style="${cv(w.color)}${top !== undefined ? `;top:${top}px` : ''}">
+  return `<button class="tile dep" data-kind="wallet" data-id="${w.id}" style="${cv(w.color)}${top !== undefined ? ';' + top : ''}">
     <span class="coin">${icon(w.icon)}</span>
     <span class="dhead"><span class="dot"></span><span class="tname">${esc(w.name)}${w.goal ? ' · ' + esc(w.goal) : ''}</span>${w.rate ? `<span class="rate">${fmtRate(w.rate)}%</span>` : ''}</span>
     <span class="tamt">${fmt(bal)}</span>
@@ -446,8 +446,16 @@ function depCard(w, bal, top) {
 }
 
 const STACK_PEEK = 46, STACK_CARD = 148, STACK_MAX = 4;
-function depositsBlock(bal) {
+// deposits in the order the stack shows them: the last one brought forward comes first
+function depsOrdered() {
+  const order = pref.get('depOrder', []);
   const deps = S.wallets.filter(w => w.dep);
+  const rank = id => { const i = order.indexOf(id); return i < 0 ? 1e6 + deps.findIndex(w => w.id === id) : i; };
+  return deps.sort((a, b) => rank(a.id) - rank(b.id));
+}
+const stackPos = (i, m) => `top:${(m - 1 - i) * STACK_PEEK}px;z-index:${m - i}`;
+function depositsBlock(bal) {
+  const deps = depsOrdered();
   // wallets someone already keeps out of the plan are probably deposits — ask once
   const cand = !S.plan.depAsked && S.wallets.find(w => !w.dep && S.plan.exclude.includes(w.id));
   const offer = cand ? `<div class="dep-offer"><span>«${esc(cand.name)}» не учитывается в плане трат. Это депозит или накопления?</span>
@@ -459,12 +467,12 @@ function depositsBlock(bal) {
   const add = `<button class="dep-add" data-act="new-dep">${icon('plus')} Новый депозит</button>`;
   if (deps.length === 1) return head + offer + `<div class="stack">${depCard(deps[0], bal[deps[0].id] || 0)}</div>` + add;
   if (UI.stackOpen) return head + offer + `<div class="stack open">${deps.map(w => depCard(w, bal[w.id] || 0)).join('')}</div>
-    <div class="stack-btns">${add}<button class="dep-add" data-act="stack">Свернуть</button></div>`;
+    <div class="stack-btns">${add}<button class="dep-add" data-act="stack-all">Свернуть</button></div>`;
   const vis = deps.slice(0, STACK_MAX), m = vis.length;
-  // the first deposit lies in front; the others peek out above it
-  const cards = vis.map((w, i) => depCard(w, bal[w.id] || 0, (m - 1 - i) * STACK_PEEK)).reverse().join('');
+  // the first deposit lies in front; the others peek out above it. A tap on one behind brings it forward.
+  const cards = vis.map((w, i) => depCard(w, bal[w.id] || 0, stackPos(i, m))).join('');
   return head + offer + `<div class="stack shut" data-act="stack" style="height:${(m - 1) * STACK_PEEK + STACK_CARD}px">${cards}</div>
-    <div class="stack-hint">${deps.length > m ? `ещё ${deps.length - m} · ` : ''}нажми, чтобы раскрыть</div>`;
+    <div class="stack-btns"><button class="dep-link" data-act="stack-all">Все ${deps.length} ${plural(deps.length, ['депозит', 'депозита', 'депозитов'])}</button></div>`;
 }
 
 /* ---------- debts ---------- */
@@ -608,9 +616,12 @@ function quickBlock() {
   }).join('');
   return `<section class="quick">
     <div class="h2row"><h2>Быстрые траты</h2>${S.quick.length ? `<button class="sort-btn" data-act="quick-manage">${icon('pencil')}Настроить</button>` : ''}</div>
-    <div class="row qrow">
-      ${chips}${suggChips}
-      <button class="qchip add" data-act="quick-new"><span class="qcoin">${icon('plus')}</span><span class="qtext"><b>${S.quick.length ? 'Ещё' : 'Создать'}</b><small>одно касание</small></span></button>
+    <div class="qline">
+      <div class="row qrow">
+        ${chips}${suggChips}
+        <button class="qchip add" data-act="quick-new"><span class="qcoin">${icon('plus')}</span><span class="qtext"><b>${S.quick.length ? 'Ещё' : 'Создать'}</b><small>одно касание</small></span></button>
+      </div>
+      <button class="mic-btn" data-act="voice" aria-label="Записать траты голосом или текстом">${icon('mic')}</button>
     </div>
   </section>`;
 }
@@ -1299,7 +1310,9 @@ function openSheet(html) {
   sheetRoot.classList.remove('open');
   void sheetRoot.offsetHeight;
   sheetRoot.classList.add('open');
-  return sheetRoot.querySelector('.sheet');
+  const sheet = sheetRoot.querySelector('.sheet');
+  $$('input[inputmode="decimal"]', sheet).forEach(el => (el.value = groupDigits(el.value)));
+  return sheet;
 }
 function closeSheet() {
   document.activeElement?.blur?.();
@@ -1318,6 +1331,24 @@ if (window.visualViewport) {
   vv.addEventListener('resize', fit);
   vv.addEventListener('scroll', fit);
 }
+
+// 4124252 → 4 124 252 while typing (parseAmount ignores the spaces). Sums like 1500+320 are grouped per number.
+const groupDigits = v => String(v).replace(/(\d[\d\s]*)([.,]\d*)?/g, (m, int, frac = '') => {
+  const digits = int.replace(/\s/g, '');
+  return digits.replace(/\B(?=(\d{3})+(?!\d))/g, ' ') + (int.endsWith(' ') && !frac ? ' ' : '') + frac;
+});
+function formatAmountInput(el) {
+  const v = el.value, nv = groupDigits(v);
+  if (nv === v) return;
+  // keep the caret after the same number of non-space characters
+  const keep = v.slice(0, el.selectionStart ?? v.length).replace(/\s/g, '').length;
+  el.value = nv;
+  let i = 0;
+  for (let n = 0; i < nv.length && n < keep; i++) if (!/\s/.test(nv[i])) n++;
+  el.setSelectionRange(i, i);
+}
+// capture phase: runs before the fields' own input handlers, so they see the grouped text
+document.addEventListener('input', e => { if (e.target.matches?.('input[inputmode="decimal"]')) formatAmountInput(e.target); }, true);
 
 const sheetHead = title => `<div class="sheet-head"><h2>${esc(title)}</h2><button class="icon-btn" data-close aria-label="Закрыть">${icon('x')}</button></div>`;
 
@@ -1982,6 +2013,264 @@ function hideTip() { tip.hidden = true; tipEl?.classList.remove('on'); tipEl = n
 view.addEventListener('scroll', hideTip, { passive: true });
 
 /* =========================================================
+   Voice & AI: «кофе 1500 с каспи и такси 2000» → expenses
+   The OpenAI key lives only in this device's storage — never in the code, the data or a backup.
+   Without a key (or offline) a simple parser on the phone does the job.
+   ========================================================= */
+const AI = {
+  get key() { try { return localStorage.getItem('mt.openaiKey') || ''; } catch (e) { return ''; } },
+  set key(v) { try { v ? localStorage.setItem('mt.openaiKey', v) : localStorage.removeItem('mt.openaiKey'); } catch (e) { /* ignore */ } },
+  get model() { try { return localStorage.getItem('mt.openaiModel') || 'gpt-4o-mini'; } catch (e) { return 'gpt-4o-mini'; } },
+  set model(v) { try { localStorage.setItem('mt.openaiModel', v || 'gpt-4o-mini'); } catch (e) { /* ignore */ } },
+
+  async json(system, user) {
+    if (!this.key) throw new Error('Добавьте ключ OpenAI в настройках');
+    let res;
+    try {
+      res = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.key}` },
+        body: JSON.stringify({ model: this.model, temperature: 0.2, response_format: { type: 'json_object' },
+          messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }),
+      });
+    } catch (e) { throw new Error('Нет связи с OpenAI'); }
+    if (!res.ok) {
+      if (res.status === 401) throw new Error('Ключ OpenAI не подходит — проверьте его в настройках');
+      if (res.status === 429) throw new Error('Лимит OpenAI исчерпан или слишком много запросов');
+      if (res.status === 404) throw new Error(`Модель «${this.model}» недоступна — смените её в настройках`);
+      throw new Error(`Ошибка OpenAI (${res.status})`);
+    }
+    const data = await res.json();
+    try { return JSON.parse(data.choices[0].message.content); } catch (e) { throw new Error('ИИ ответил непонятно, попробуйте ещё раз'); }
+  },
+};
+
+const escRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const capFirst = s => (s ? s[0].toUpperCase() + s.slice(1) : s);
+
+// What was this bought with last time? The newest expense with the same description decides — this is how
+// categories are "learned": correct one once and the next «Magnum» lands in the right place.
+function guessFromHistory(sub) {
+  const q = lowerRu(sub);
+  if (!q) return null;
+  let best = null;
+  for (const t of S.tx) {
+    if (t.type !== 'expense' || !t.sub || !find('category', t.to)) continue;
+    const ts = lowerRu(t.sub);
+    if (ts !== q && !(q.length >= 4 && (ts.startsWith(q) || q.startsWith(ts)))) continue;
+    if (!best || t.date > best.date || (t.date === best.date && (t.ts || 0) > (best.ts || 0))) best = t;
+  }
+  return best && { to: best.to, from: find('wallet', best.from) && !isDep(best.from) ? best.from : null };
+}
+function usualWallet() {
+  const since = ymd(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 30)), n = {};
+  for (const t of S.tx) if (t.type === 'expense' && t.date >= since && find('wallet', t.from) && !isDep(t.from)) n[t.from] = (n[t.from] || 0) + 1;
+  return Object.keys(n).sort((a, b) => n[b] - n[a])[0] || spendWallets()[0]?.id || null;
+}
+// «каспи», «фридом» should find Kaspi and Freedom: compare against a rough Cyrillic reading of the name too
+const TRANSLIT = [['ee', 'и'], ['oo', 'у'], ['sh', 'ш'], ['ch', 'ч'], ['kh', 'х'], ['ya', 'я'], ['yu', 'ю'],
+  ...[...'abcdefghijklmnopqrstuvwxyz'].map((c, i) => [c, 'абкдефгхижклмнопкрстуввксыз'[i]])];
+const toCyr = s => TRANSLIT.reduce((a, [l, c]) => a.split(l).join(c), lowerRu(s));
+const walletStems = w => [...new Set([lowerRu(w.name), toCyr(w.name)].map(n => n.replace(/[^a-zа-я0-9]/g, '').slice(0, 4)).filter(n => n.length >= 3))];
+const catByName = name => S.categories.find(c => lowerRu(c.name) === lowerRu(name));
+const walletByName = name => spendWallets().find(w => lowerRu(w.name) === lowerRu(name));
+
+function parseSpendsLocal(text) {
+  const yesterday = /вчера/i.test(text);
+  const date = yesterday ? ymd(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1)) : today();
+  const out = [];
+  for (let ch of text.replace(/вчера/gi, ' ').split(/\s*(?:(?<!\d),|,(?!\d)|[;\n]|\s(?:и|плюс|потом|ещё|еще)\s)\s*/i)) {
+    const m = ch.match(/(\d[\d\s]*(?:[.,]\d+)?)\s*(тысяч[аи]?|тыс\.?|тыщ[иу]?|к(?![а-яё]))?/i);
+    if (!m) continue;
+    const amount = Math.round(parseFloat(m[1].replace(/\s/g, '').replace(',', '.')) * (m[2] ? 1000 : 1) * 100) / 100;
+    if (!(amount > 0)) continue;
+    let rest = ` ${lowerRu(ch.slice(0, m.index))} ${lowerRu(ch.slice(m.index + m[0].length))} `.replace(/(\s)(?:тенге|тг)(?=\s)|₸/g, '$1');
+    let from = null;
+    for (const w of spendWallets()) {
+      const re = new RegExp(`\\s(?:(?:с|со|на|через|по|картой)\\s+)?(?:${walletStems(w).map(escRe).join('|')})[а-яa-z]*(?=\\s)`);
+      if (walletStems(w).length && re.test(rest)) { from = w.id; rest = rest.replace(re, ' '); break; }
+    }
+    const sub = capFirst(rest.replace(/\s(?:за|на|в)\s*$/i, ' ').replace(/^\s*(?:за|на)\s/i, ' ').replace(/\s+/g, ' ').trim());
+    const g = guessFromHistory(sub);
+    out.push({ amount, sub, to: g?.to || catByName(sub)?.id || null, from: from || g?.from || usualWallet(), date });
+  }
+  return out;
+}
+
+async function parseSpendsAI(text) {
+  const recent = [], seen = new Set();
+  for (const t of sortTx(S.tx.filter(t => t.type === 'expense' && t.sub && find('category', t.to)))) {
+    const k = lowerRu(t.sub);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    recent.push(`${t.sub} → ${findOr('category', t.to).name}`);
+    if (recent.length >= 40) break;
+  }
+  const r = await AI.json(
+    `Ты разбираешь короткую запись трат на русском (могут встречаться казахские слова) и возвращаешь только JSON:
+{"items":[{"amount": сумма в тенге числом, "what": "на что, коротко, с большой буквы", "category": "точное название из списка категорий или null", "new_category": "короткое название новой категории — только если ни одна из списка не подходит, иначе null", "wallet": "точное название кошелька из списка или null", "date": "YYYY-MM-DD"}]}
+Сегодня ${today()}. «Вчера» — это ${ymd(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1))}. «Полторы тысячи», «1.5к», «тыщу» — пиши числами.
+Категории: ${S.categories.map(c => c.name).join(', ')}.
+Кошельки: ${spendWallets().map(w => w.name).join(', ')}.
+Как человек раньше относил траты (что → категория): ${recent.join('; ') || 'пока нет'}.
+Не выдумывай траты, которых нет в тексте. Переводы и доходы пропускай.`, text);
+  const items = Array.isArray(r?.items) ? r.items : [];
+  return items.map(x => {
+    const amount = Math.round(Number(String(x.amount).replace(/[^\d.,]/g, '').replace(',', '.')) * 100) / 100;
+    const sub = capFirst(String(x.what || '').trim().slice(0, 40));
+    const g = guessFromHistory(sub);
+    const cat = catByName(x.category || '') || (g && find('category', g.to));
+    return {
+      amount, sub,
+      to: cat?.id || null,
+      newCat: !cat && x.new_category ? capFirst(String(x.new_category).trim().slice(0, 24)) : '',
+      from: walletByName(x.wallet || '')?.id || g?.from || usualWallet(),
+      date: /^\d{4}-\d{2}-\d{2}$/.test(x.date || '') && x.date <= today() ? x.date : today(),
+    };
+  }).filter(x => x.amount > 0);
+}
+
+function openVoice(text = '') {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const sh = openSheet(`
+    ${sheetHead('Записать траты')}
+    <textarea id="v-text" class="vtext" rows="3" placeholder="кофе 1500 с каспи и такси 2000" enterkeyhint="done">${esc(text)}</textarea>
+    <div class="vhint">${SR ? 'Нажмите микрофон и говорите — или напишите текстом.' : 'Продиктуйте: нажмите 🎤 на клавиатуре iPhone. Можно и текстом.'}
+      ${AI.key ? '' : '<br>Без ключа OpenAI разбираю сам — простые фразы вроде «обед 2500 с каспи». <button class="linkish" data-act="ai">Подключить ИИ</button>'}</div>
+    <div class="actions">
+      ${SR ? `<button class="btn" id="v-rec">${icon('mic')} Говорить</button>` : ''}
+      <button class="btn primary" id="v-go">${AI.key ? 'Разобрать с ИИ' : 'Разобрать'}</button>
+    </div>`);
+  const ta = $('#v-text', sh);
+  if (!SR) setTimeout(() => ta.focus(), 300);
+  let rec = null;
+  $('#v-rec', sh)?.addEventListener('click', () => {
+    if (rec) { rec.stop(); return; }
+    rec = new SR();
+    rec.lang = 'ru-RU';
+    rec.interimResults = true;
+    rec.continuous = true;
+    const base = ta.value ? ta.value.trim() + ', ' : '';
+    rec.onresult = e => { ta.value = base + [...e.results].map(r => r[0].transcript).join(' '); };
+    rec.onend = () => { rec = null; $('#v-rec', sh) && ($('#v-rec', sh).innerHTML = `${icon('mic')} Говорить`); };
+    rec.onerror = () => toast('Микрофон недоступен — продиктуйте через клавиатуру');
+    rec.start();
+    $('#v-rec', sh).innerHTML = `<span class="rec-dot"></span> Стоп`;
+  });
+  $('#v-go', sh).onclick = async () => {
+    rec?.stop();
+    const t = ta.value.trim();
+    if (!t) return shake(ta);
+    let items, note = '';
+    if (AI.key) {
+      const btn = $('#v-go', sh);
+      btn.disabled = true;
+      btn.textContent = 'Разбираю…';
+      try { items = await parseSpendsAI(t); }
+      catch (e) { items = parseSpendsLocal(t); note = `${e.message}. Разобрал сам — проверьте.`; }
+      if (!sh.isConnected) return;
+      btn.disabled = false;
+    } else items = parseSpendsLocal(t);
+    if (!items.length) return toast('Не нашёл сумм — напишите, например, «обед 2500»');
+    openVoiceReview(items, t, note);
+  };
+}
+
+function openVoiceReview(items, text, note = '') {
+  if (!S.categories.length || !spendWallets().length) return toast('Нужны хотя бы один кошелёк и одна категория');
+  const catOpts = it => `${it.newCat ? `<option value="new" selected>＋ ${esc(it.newCat)} (новая)</option>` : ''}
+    ${it.to ? '' : it.newCat ? '' : '<option value="" selected disabled>Категория?</option>'}
+    ${S.categories.map(c => `<option value="${c.id}" ${c.id === it.to ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}`;
+  const row = (it, i) => `<div class="vrow" data-i="${i}">
+    <div class="vrow-top">
+      <input class="v-sub" value="${esc(it.sub)}" placeholder="На что" maxlength="40" autocomplete="off" enterkeyhint="done">
+      <input class="v-amt" inputmode="decimal" value="${it.amount}" autocomplete="off" enterkeyhint="done"><span class="v-cur">₸</span>
+      <button class="icon-btn v-del" aria-label="Убрать">${icon('x')}</button>
+    </div>
+    <div class="vrow-sel">
+      <select class="v-cat ${it.to || it.newCat ? '' : 'need'}">${catOpts(it)}</select>
+      <select class="v-w">${spendWallets().map(w => `<option value="${w.id}" ${w.id === it.from ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select>
+    </div>
+    ${it.date !== today() ? `<div class="v-date">${dayLabel(it.date)}</div>` : ''}
+  </div>`;
+  const sh = openSheet(`
+    ${sheetHead('Проверьте')}
+    ${note ? `<div class="vnote">${esc(note)}</div>` : ''}
+    <div id="v-list">${items.map(row).join('')}</div>
+    <div class="actions"><button class="btn" id="v-back">Назад</button><button class="btn primary" id="v-save"></button></div>`);
+  const total = () => {
+    const rows = $$('.vrow', sh);
+    const sum = rows.reduce((a, r) => a + (money($('.v-amt', r).value) || 0), 0);
+    $('#v-save', sh).textContent = rows.length ? `Записать ${fmt(sum)}` : 'Нечего записывать';
+  };
+  total();
+  sh.addEventListener('input', total);
+  sh.addEventListener('change', e => e.target.classList.contains('v-cat') && e.target.classList.remove('need'));
+  sh.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.tagName === 'INPUT') e.target.blur(); });
+  sh.addEventListener('click', e => { const d = e.target.closest('.v-del'); if (d) { d.closest('.vrow').remove(); total(); } });
+  $('#v-back', sh).onclick = () => openVoice(text);
+  $('#v-save', sh).onclick = () => {
+    const rows = $$('.vrow', sh);
+    if (!rows.length) return closeSheet();
+    const recs = [];
+    for (const r of rows) {
+      const it = items[+r.dataset.i], amount = money($('.v-amt', r).value), cat = $('.v-cat', r);
+      if (!(amount > 0)) return shake($('.v-amt', r));
+      if (!cat.value) { cat.classList.add('need'); return shake(cat); }
+      recs.push({ it, amount, sub: $('.v-sub', r).value.trim(), to: cat.value, from: $('.v-w', r).value });
+    }
+    const undo = snapshot();
+    const created = {};
+    for (const x of recs) {
+      if (x.to === 'new') {
+        const name = x.it.newCat;
+        if (!created[name]) {
+          const ex = catByName(name);
+          if (ex) created[name] = ex.id;
+          else {
+            const ic = BOK_ICONS.find(([re]) => re.test(lowerRu(name)))?.[1] || 'shopping-bag';
+            const c = { id: uid(), name, icon: ic, color: COLORS[(S.categories.length * 5 + 3) % COLORS.length], budget: 0 };
+            S.categories.push(c);
+            created[name] = c.id;
+          }
+        }
+        x.to = created[name];
+      }
+      S.tx.push({ id: uid(), type: 'expense', from: x.from, to: x.to, amount: x.amount, date: x.it.date, sub: x.sub, note: '', ts: Date.now() });
+    }
+    UI.bump = recs[recs.length - 1].to;
+    save();
+    closeSheet();
+    render();
+    const sum = recs.reduce((a, x) => a + x.amount, 0);
+    toast(`Записано ${recs.length} ${plural(recs.length, ['трата', 'траты', 'трат'])}: ${fmt(sum)}`, undo, true);
+  };
+}
+
+function openAISettings() {
+  const sh = openSheet(`
+    ${sheetHead('ИИ (OpenAI)')}
+    <p class="set-note" style="padding:0 0 8px">ИИ разбирает голосовые и текстовые записи трат и подбирает категории. Без ключа работает простой разбор на телефоне.</p>
+    <div class="field"><span>Ключ API</span><input id="ai-key" type="password" placeholder="${AI.key ? '•••• сохранён' : 'sk-…'}" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="done"></div>
+    <div class="field"><span>Модель</span><input id="ai-model" value="${esc(AI.model)}" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="done"></div>
+    <p class="set-note" style="padding:10px 0 0">Ключ хранится только на этом телефоне: его нет в коде, в данных и в резервной копии. Создайте отдельный ключ и поставьте месячный лимит трат в кабинете OpenAI. В OpenAI уходит только текст, который вы диктуете, плюс названия ваших категорий и кошельков.</p>
+    <div class="actions">
+      ${AI.key ? `<button class="btn danger" id="ai-del">Удалить ключ</button>` : ''}
+      <button class="btn primary" id="ai-save">Сохранить</button>
+    </div>`);
+  sh.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.tagName === 'INPUT') e.target.blur(); });
+  $('#ai-save', sh).onclick = () => {
+    const k = $('#ai-key', sh).value.trim();
+    if (k) AI.key = k;
+    AI.model = $('#ai-model', sh).value.trim();
+    closeSheet();
+    render();
+    toast(AI.key ? 'ИИ подключён' : 'Сохранено');
+  };
+  $('#ai-del', sh)?.addEventListener('click', () => { AI.key = ''; closeSheet(); render(); toast('Ключ удалён'); });
+}
+
+/* =========================================================
    Settings
    ========================================================= */
 function renderSettings() {
@@ -1993,6 +2282,7 @@ function renderSettings() {
     <div class="set-list">
       <button class="set-row" data-act="plan">${icon('calendar')}План трат<small>${S.plan.on ? 'Зарплата ' + S.plan.paydays.join(' и ') : 'Выключен'}</small></button>
       <button class="set-row" data-act="quick-manage">${icon('zap')}Быстрые траты<small>${S.quick.length}</small></button>
+      <button class="set-row" data-act="ai">${icon('key-round')}ИИ (OpenAI)<small>${AI.key ? 'подключён' : 'нет ключа'}</small></button>
     </div>
     <div class="set-note">План показывает, сколько можно потратить сегодня, чтобы денег хватило до зарплаты.</div>
 
@@ -2029,7 +2319,7 @@ function renderSettings() {
     <div class="set-list">
       <button class="set-row danger" data-act="reset">${icon('trash-2')}Стереть все данные</button>
     </div>
-    <div class="set-note">Деньги · v2.1 · работает без интернета</div>`;
+    <div class="set-note">Деньги · v2.2 · работает без интернета</div>`;
 }
 
 async function exportData() {
@@ -2259,12 +2549,17 @@ const ACTIONS = {
   'import-csv': () => $('#import-csv').click(),
   theme: el => { pref.set('theme', el.dataset.theme); applyTheme(); render(); },
   stack: (el, e) => {
-    // in tap-to-pick mode a tap on a card finishes the transfer instead of fanning the stack out
     const t = e?.target.closest('.tile[data-id]');
-    if (UI.sel && t) return tapTile(t);
-    UI.stackOpen = !UI.stackOpen;
-    render();
+    if (!t) return;
+    const ids = depsOrdered().map(w => w.id);
+    // the front card (or any card while picking a transfer target) behaves like any other tile
+    if (UI.sel || ids[0] === t.dataset.id) return tapTile(t);
+    const order = [t.dataset.id, ...ids.filter(id => id !== t.dataset.id)];
+    pref.set('depOrder', order);
+    const m = Math.min(order.length, STACK_MAX);
+    $$('.tile.dep', el).forEach(c => { const i = order.indexOf(c.dataset.id); c.style.top = `${(m - 1 - i) * STACK_PEEK}px`; c.style.zIndex = m - i; });
   },
+  'stack-all': () => { UI.stackOpen = !UI.stackOpen; render(); },
   'new-dep': () => { clearSel(); openItem('wallet', null, { dep: true }); },
   'dep-yes': el => {
     const w = find('wallet', el.dataset.id);
@@ -2278,6 +2573,8 @@ const ACTIONS = {
   },
   'dep-no': () => { S.plan.depAsked = true; save(); render(); },
   debts: el => { clearSel(); openDebts(el.dataset.dir); },
+  voice: () => { clearSel(); openVoice(); },
+  ai: () => openAISettings(),
   reset: () => {
     if (!confirm('Стереть ВСЕ данные?\n\nСовет: сначала сохраните копию.')) return;
     const undo = snapshot();
