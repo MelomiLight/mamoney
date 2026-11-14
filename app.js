@@ -50,6 +50,7 @@ const MONTHS = ['Январь', 'Февраль', 'Март', 'Апрель', '�
 const MON = ['янв', 'фев', 'мар', 'апр', 'мая', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
 const MON_AXIS = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
 const MON_GEN = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
+const MON_PREP = ['январе', 'феврале', 'марте', 'апреле', 'мае', 'июне', 'июле', 'августе', 'сентябре', 'октябре', 'ноябре', 'декабре'];
 const MON_DAT = ['январю', 'февралю', 'марту', 'апрелю', 'маю', 'июню', 'июлю', 'августу', 'сентябрю', 'октябрю', 'ноябрю', 'декабрю'];
 
 const COLORS = ['#ef4444', '#f97316', '#f59e0b', '#eab308', '#84cc16', '#22c55e', '#10b981',
@@ -57,7 +58,7 @@ const COLORS = ['#ef4444', '#f97316', '#f59e0b', '#eab308', '#84cc16', '#22c55e'
   '#d946ef', '#ec4899', '#f43f5e', '#a16207', '#78716c', '#64748b', '#334155'];
 
 const UI_ICONS = new Set(['plus', 'x', 'chevron-left', 'chevron-right', 'list', 'chart-pie', 'settings',
-  'arrow-down-wide-narrow', 'arrow-up-narrow-wide', 'arrow-right', 'trash-2', 'download', 'upload', 'check', 'search', 'arrow-down', 'mic', 'key-round']);
+  'arrow-down-wide-narrow', 'arrow-up-narrow-wide', 'arrow-right', 'trash-2', 'download', 'upload', 'check', 'search', 'arrow-down', 'mic', 'key-round', 'lightbulb']);
 const PICKER_ICONS = Object.keys(ICONS).filter(n => !UI_ICONS.has(n));
 
 /* kinds: income source → wallet → category.
@@ -169,6 +170,7 @@ const now = new Date();
 const UI = {
   tab: 'home',
   animate: true, // rings and bars grow in when the home screen opens
+  dots: new Set(), // categories that just got a spending tip
   period: { mode: pref.get('mode', 'month'), y: now.getFullYear(), m: now.getMonth() },
   sort: pref.get('sort', 'manual'),
   sel: null,
@@ -372,7 +374,7 @@ function catTile(c, spent, limit) {
   else { label = fmtShort(spent); cls = spent ? '' : 'zero'; }
   return `<button class="tile cat ${UI.bump === c.id ? 'bump' : ''}" data-kind="category" data-id="${c.id}" style="${cv(c.color)}">
     <span class="ring ${over ? 'over' : ''}"><svg viewBox="0 0 64 64" width="64" height="64" aria-hidden="true"><circle class="trk" cx="32" cy="32" r="29"/>${pct > 0 && !over ? `<circle class="arc" cx="32" cy="32" r="29" style="--len:${(pct * RING_C).toFixed(1)}" stroke-dasharray="${(pct * RING_C).toFixed(1)} ${RING_C.toFixed(1)}"/>` : ''}</svg>
-    <span class="coin">${icon(c.icon)}</span></span>
+    <span class="coin">${icon(c.icon)}</span>${UI.dots.has(c.id) ? '<span class="cdot"></span>' : ''}</span>
     <span class="tname">${esc(c.name)}</span>
     <span class="tamt ${cls}">${label}</span>
   </button>`;
@@ -402,6 +404,7 @@ function renderHome() {
 
   view.innerHTML = `<div class="${anim}">
     <div class="today-line">Сегодня потрачено <b>${fmt(spentToday)}</b></div>
+    ${storiesRow()}
     ${planCard()}
     ${quickBlock()}
     <div class="h2row"><h2>Доходы</h2><span class="total">${fmt(s.totalInc)}</span></div>
@@ -634,11 +637,14 @@ function useQuick(id) {
   if (!from) return toast('Сначала добавьте кошелёк');
   if (!q.amount) return openTx({ type: 'expense', from, to: q.to, sub: q.sub });
   const undo = snapshot();
-  S.tx.push({ id: uid(), type: 'expense', from, to: q.to, amount: q.amount, date: today(), sub: q.sub || '', note: '', ts: Date.now() });
+  const rec = { id: uid(), type: 'expense', from, to: q.to, amount: q.amount, date: today(), sub: q.sub || '', note: '', ts: Date.now() };
+  S.tx.push(rec);
+  const tip = spendTip(rec);
   UI.bump = q.to;
+  if (tip) UI.dots.add(q.to);
   save();
   render();
-  toast(`${q.name}: −${fmt(q.amount)}`, undo, true);
+  toast(`${q.name}: −${fmt(q.amount)}`, undo, true, tip);
 }
 
 function openQuick(id, pre) {
@@ -1144,6 +1150,7 @@ function clearSel() {
 
 function tapTile(el) {
   const { kind, id } = el.dataset;
+  if (UI.dots.delete(id)) el.querySelector('.cdot')?.remove();
   const sel = UI.sel;
   if (sel) {
     if (sel.kind === kind && sel.id === id) { clearSel(); return openItem(kind, id); }
@@ -1483,11 +1490,13 @@ function openTx(o) {
     if ($('#f-quick', sh)?.checked) {
       S.quick.push({ id: uid(), name: rec.sub || findOr('category', rec.to).name, amount, from: rec.from, to: rec.to, sub: rec.sub });
     }
+    const tip = !ex && rec.type === 'expense' && !rec.bill ? spendTip(rec) : null;
     if (!ex && rec.type === 'expense') UI.bump = rec.to;
+    if (tip) UI.dots.add(rec.to);
     save();
     render();
     if (o.back) o.back(); else closeSheet();
-    toast(ex ? 'Изменено' : `Записано: ${fmt(amount)}`, undo, !ex);
+    toast(ex ? 'Изменено' : `Записано: ${fmt(amount)}`, undo, !ex, tip);
   };
   if (ex) $('#tx-del', sh).onclick = () => {
     const undo = snapshot();
@@ -2013,6 +2022,221 @@ function hideTip() { tip.hidden = true; tipEl?.classList.remove('on'); tipEl = n
 view.addEventListener('scroll', hideTip, { passive: true });
 
 /* =========================================================
+   Insights: stories under the month title, and a tip right after a purchase.
+   Everything is counted on the phone from the records — no AI, works offline.
+   ========================================================= */
+const monthOf = (k = 0) => new Date(now.getFullYear(), now.getMonth() + k, 1);
+const ymOf = d => ymd(d).slice(0, 7);
+const daysIn = d => new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+
+// Expenses of a month (bills apart — they are planned), optionally only up to a day of the month
+function monthExp(ym, upToDay) {
+  const by = {}, subs = {};
+  let total = 0;
+  for (const t of S.tx) {
+    if (t.type !== 'expense' || t.bill || !t.date.startsWith(ym)) continue;
+    if (upToDay && +t.date.slice(8) > upToDay) continue;
+    by[t.to] = (by[t.to] || 0) + t.amount;
+    total += t.amount;
+    if (t.sub) {
+      const k = `${t.to}|${lowerRu(t.sub)}`;
+      const e = subs[k] || (subs[k] = { to: t.to, sub: t.sub, n: 0, sum: 0 });
+      e.n++; e.sum += t.amount;
+    }
+  }
+  return { by, total, subs: Object.values(subs) };
+}
+
+function insights() {
+  const out = [];
+  const m0 = monthOf(), ym = ymOf(m0), day = now.getDate(), dim = daysIn(m0);
+  const first = S.tx.reduce((a, t) => (!a || t.date < a ? t.date : a), null);
+  if (!first) return out;
+  const cur = monthExp(ym);
+  const pm = monthOf(-1), pym = ymOf(pm);
+  const hasPrev = first < `${ym}-01`;
+  const prevSame = hasPrev ? monthExp(pym, day) : null;
+  const prevFull = hasPrev ? monthExp(pym) : null;
+  // last three full months + this one, for the bar charts
+  const months = [-3, -2, -1, 0].map(k => monthOf(k)).filter(d => ymOf(d) >= first.slice(0, 7));
+  const monthBars = catId => months.map(d => {
+    const e = monthExp(ymOf(d));
+    const v = catId ? e.by[catId] || 0 : e.total;
+    return { label: MON_AXIS[d.getMonth()], v, now: ymOf(d) === ym };
+  });
+  const pace = v => (v / day) * dim;
+
+  // 1. a category growing faster than last month
+  if (prevSame && day >= 5) {
+    let best = null;
+    for (const c of S.categories) {
+      const v = cur.by[c.id] || 0, p = prevSame.by[c.id] || 0;
+      if (p > 0 && v - p >= 3000 && (v - p) / p >= 0.15 && (!best || v - p > best.d)) best = { c, v, p, d: v - p };
+    }
+    if (best) {
+      const { c, v, p } = best, pct = Math.round(((v - p) / p) * 100);
+      const subs = cur.subs.filter(e => e.to === c.id).sort((a, b) => b.sum - a.sum).slice(0, 3);
+      out.push({
+        id: `up:${ym}:${c.id}`, label: `${c.name} +${pct}%`, icon: c.icon, color: c.color,
+        title: `На «${c.name}» уходит на ${pct}% больше, чем в ${MON_PREP[pm.getMonth()]}`,
+        text: `К этому дню: ${fmt0(v)} против ${fmt0(p)}. В таком темпе к концу месяца — ${fmt0(pace(v))}${c.budget ? ` при лимите ${fmt0(c.budget)}` : ''}.`,
+        bars: monthBars(c.id), rows: subs.map(e => [`${e.sub} · ${e.n} ${plural(e.n, ['раз', 'раза', 'раз'])}`, fmt0(e.sum)]),
+        action: ['Открыть в аналитике', () => { UI.openCat = c.id; setTab('analytics'); }],
+      });
+    }
+  }
+
+  // 2. a category limit that will run out before the month ends
+  const upCat = out[0]?.id.startsWith('up:') ? out[0].id.split(':')[2] : null; // one story per category is enough
+  for (const c of S.categories) {
+    const v = cur.by[c.id] || 0;
+    if (c.id === upCat || !c.budget || v >= c.budget || day < 3 || pace(v) <= c.budget * 1.05) continue;
+    const endDay = Math.min(dim, Math.max(day, Math.floor(c.budget / (v / day))));
+    out.push({
+      id: `lim:${ym}:${c.id}`, label: `Лимит ${c.name}`, icon: 'calendar', color: c.color,
+      title: `Лимит «${c.name}» закончится примерно ${endDay} ${MON_GEN[m0.getMonth()]}`,
+      text: `Потрачено ${fmt0(v)} из ${fmt0(c.budget)}. Чтобы уложиться, до конца месяца — не больше ${fmt0((c.budget - v) / (dim - day + 1))} в день.`,
+      bars: monthBars(c.id), action: ['Открыть в аналитике', () => { UI.openCat = c.id; setTab('analytics'); }],
+    });
+    break;
+  }
+
+  // 3. a small purchase that adds up
+  const freq = cur.subs.filter(e => e.n >= 4).sort((a, b) => b.sum - a.sum)[0];
+  if (freq) {
+    const c = findOr('category', freq.to);
+    out.push({
+      id: `freq:${ym}:${lowerRu(freq.sub)}:${Math.floor(freq.n / 5)}`, label: freq.sub, icon: c.icon, color: c.color,
+      title: `«${freq.sub}» — ${freq.n} ${plural(freq.n, ['раз', 'раза', 'раз'])} за месяц`,
+      text: `Всего ${fmt0(freq.sum)}, в среднем ${fmt0(freq.sum / freq.n)} за раз. Если вдвое реже — останется около ${fmt0(freq.sum / 2)}.`,
+    });
+  }
+
+  // 4. where the month is heading
+  if (day >= 3 && cur.total > 0) {
+    const f = pace(cur.total), pt = prevFull?.total || 0;
+    const cmp = pt ? Math.round(((f - pt) / pt) * 100) : 0;
+    out.push({
+      id: `fc:${ym}:${Math.floor((day - 1) / 7)}`, label: 'Прогноз', icon: 'trending-up', color: '#0ea5e9',
+      title: `За ${MONTHS[m0.getMonth()].toLowerCase()} уйдёт около ${fmt0(f)}`,
+      text: `Сейчас ${fmt0(cur.total)} за ${day} ${plural(day, DAYS)}.${pt ? ` Это ${cmp > 0 ? `на ${cmp}% больше` : cmp < 0 ? `на ${-cmp}% меньше` : 'столько же'}, чем за весь ${MONTHS[pm.getMonth()].toLowerCase()} (${fmt0(pt)}).` : ''}`,
+      bars: monthBars().map(b => (b.now ? { ...b, v: f, label: b.label + ' ≈' } : b)),
+    });
+  }
+
+  // 5. bills and subscriptions against income
+  const billsSum = S.plan.bills.reduce((a, b) => a + b.amount, 0);
+  if (billsSum > 0) {
+    let inc = 0, n = 0;
+    for (const k of [-3, -2, -1]) {
+      const d = monthOf(k), y = ymOf(d);
+      if (y < first.slice(0, 7)) continue;
+      n++;
+      inc += S.tx.filter(t => t.type === 'income' && t.date.startsWith(y)).reduce((a, t) => a + t.amount, 0);
+    }
+    if (n && inc > 0) {
+      const pct = Math.round((billsSum / (inc / n)) * 100);
+      out.push({
+        id: `bills:${ym}:${pct}`, label: 'Платежи', icon: 'repeat', color: '#8b5cf6',
+        title: `Платежи и подписки — ${pct}% дохода`,
+        text: `${fmt0(billsSum)} в месяц при среднем доходе ${fmt0(inc / n)}.`,
+        rows: [...S.plan.bills].sort((a, b) => b.amount - a.amount).slice(0, 5).map(b => [b.name, fmt0(b.amount)]),
+        action: ['Открыть план трат', () => openPlan()],
+      });
+    }
+  }
+
+  // 6. how far a savings goal is
+  const bal = balances();
+  const dep = S.wallets.find(w => w.dep && w.goalAmount > (bal[w.id] || 0));
+  if (dep) {
+    const left = dep.goalAmount - (bal[dep.id] || 0);
+    const since = ymd(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 90));
+    const inflow = S.tx.filter(t => t.to === dep.id && t.date >= since && (t.type === 'transfer' || t.type === 'income')).reduce((a, t) => a + t.amount, 0) / 3;
+    let need = '';
+    if (dep.goalDate) {
+      const [y, mo] = dep.goalDate.split('-').map(Number);
+      const months = (y - now.getFullYear()) * 12 + (mo - 1 - now.getMonth());
+      if (months > 0) need = ` Чтобы успеть к ${MON_DAT[mo - 1]}${y !== now.getFullYear() ? ' ' + y : ''}, нужно ${fmt0(left / months)} в месяц.`;
+    }
+    out.push({
+      id: `goal:${dep.id}:${Math.round(left / 50000)}`, label: dep.goal || dep.name, icon: dep.icon, color: dep.color,
+      title: `До цели «${dep.goal || dep.name}» осталось ${fmt0(left)}`,
+      text: (inflow > 0 ? `Откладываешь в среднем ${fmt0(inflow)} в месяц — это примерно ${Math.ceil(left / inflow)} ${plural(Math.ceil(left / inflow), ['месяц', 'месяца', 'месяцев'])}.` : 'За последние три месяца пополнений не было.') + need,
+    });
+  }
+  return out;
+}
+
+const seenStories = () => pref.get('storiesSeen', []);
+function storiesRow() {
+  const list = insights();
+  UI.stories = list;
+  if (!list.length) return '';
+  const seen = new Set(seenStories());
+  // new ones first
+  const order = list.map((s, i) => ({ s, i })).sort((a, b) => seen.has(a.s.id) - seen.has(b.s.id));
+  return `<div class="row stories">${order.map(({ s, i }) => `<button class="story ${seen.has(s.id) ? 'seen' : ''}" data-act="story" data-i="${i}" style="${cv(s.color)}">
+    <span class="sring"><span class="coin">${icon(s.icon)}</span></span><span class="slabel">${esc(s.label)}</span></button>`).join('')}</div>`;
+}
+
+function openStory(i) {
+  const list = UI.stories || [];
+  const s = list[i];
+  if (!s) return closeStory();
+  const seen = seenStories();
+  if (!seen.includes(s.id)) pref.set('storiesSeen', [...seen, s.id].slice(-200));
+  let el = $('#story');
+  if (!el) { el = document.createElement('div'); el.id = 'story'; document.body.appendChild(el); }
+  const top = Math.max(1, ...(s.bars || []).map(b => b.v));
+  el.style.cssText = cv(s.color);
+  el.innerHTML = `
+    <div class="st-bars">${list.map((_, k) => `<i class="${k < i ? 'done' : k === i ? 'on' : ''}"></i>`).join('')}</div>
+    <div class="st-head"><span class="coin">${icon(s.icon)}</span><span>${esc(s.label)}</span><button class="icon-btn" data-st="close" aria-label="Закрыть">${icon('x')}</button></div>
+    <div class="st-body">
+      <h2>${esc(s.title)}</h2>
+      <p>${esc(s.text)}</p>
+      ${s.bars?.length > 1 ? `<div class="st-chart">${s.bars.map(b => `<div class="${b.now ? 'now' : ''}"><i style="height:${Math.max(3, (b.v / top) * 100)}%"></i><span>${esc(b.label)}</span></div>`).join('')}</div>` : ''}
+      ${s.rows?.length ? `<div class="st-rows">${s.rows.map(([k, v]) => `<div><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join('')}</div>` : ''}
+    </div>
+    ${s.action ? `<button class="btn st-act" data-st="act">${esc(s.action[0])}</button>` : ''}
+    <div class="st-nav"><button data-st="prev" aria-label="Назад"></button><button data-st="next" aria-label="Дальше"></button></div>`;
+  el.hidden = false;
+  el.onclick = e => {
+    const b = e.target.closest('[data-st]');
+    if (!b) return;
+    const k = b.dataset.st;
+    if (k === 'close') return closeStory();
+    if (k === 'act') { closeStory(); return s.action[1](); }
+    if (k === 'prev') return i > 0 ? openStory(i - 1) : null;
+    if (k === 'next') return i < list.length - 1 ? openStory(i + 1) : closeStory();
+  };
+}
+function closeStory() {
+  const el = $('#story');
+  if (el) el.hidden = true;
+  if (UI.tab === 'home') render();
+}
+
+// One line right after a purchase — only when there's something worth saying
+function spendTip(t) {
+  const c = find('category', t.to);
+  if (!c) return null;
+  const ym = t.date.slice(0, 7), e = monthExp(ym);
+  const mi = +ym.slice(5) - 1;
+  if (c.budget > 0 && ym === ymOf(monthOf())) {
+    const v = e.by[c.id] || 0, left = c.budget - v, daysLeft = daysIn(monthOf()) - now.getDate() + 1;
+    if (left < 0) return `Лимит «${c.name}» превышен на ${fmt0(-left)}.`;
+    if (left < c.budget * 0.25) return `В «${c.name}» до лимита осталось ${fmt0(left)} на ${daysLeft} ${plural(daysLeft, DAYS)}.`;
+  }
+  if (t.sub) {
+    const s = e.subs.find(x => x.to === c.id && lowerRu(x.sub) === lowerRu(t.sub));
+    if (s && s.n >= 3) return `Это ${s.n}-й «${t.sub}» в ${MON_PREP[mi]} — уже ${fmt0(s.sum)}.`;
+  }
+  return null;
+}
+
+/* =========================================================
    Voice & AI: «кофе 1500 с каспи и такси 2000» → expenses
    The OpenAI key lives only in this device's storage — never in the code, the data or a backup.
    Without a key (or offline) a simple parser on the phone does the job.
@@ -2239,11 +2463,14 @@ function openVoiceReview(items, text, note = '') {
       S.tx.push({ id: uid(), type: 'expense', from: x.from, to: x.to, amount: x.amount, date: x.it.date, sub: x.sub, note: '', ts: Date.now() });
     }
     UI.bump = recs[recs.length - 1].to;
+    // one tip is enough: the first purchase that has something worth saying
+    let tip = null;
+    for (const t of S.tx.slice(-recs.length)) if ((tip = spendTip(t))) { UI.dots.add(t.to); break; }
     save();
     closeSheet();
     render();
     const sum = recs.reduce((a, x) => a + x.amount, 0);
-    toast(`Записано ${recs.length} ${plural(recs.length, ['трата', 'траты', 'трат'])}: ${fmt(sum)}`, undo, true);
+    toast(`Записано ${recs.length} ${plural(recs.length, ['трата', 'траты', 'трат'])}: ${fmt(sum)}`, undo, true, tip);
   };
 }
 
@@ -2319,7 +2546,7 @@ function renderSettings() {
     <div class="set-list">
       <button class="set-row danger" data-act="reset">${icon('trash-2')}Стереть все данные</button>
     </div>
-    <div class="set-note">Деньги · v2.2 · работает без интернета</div>`;
+    <div class="set-note">Деньги · v2.3 · работает без интернета</div>`;
 }
 
 async function exportData() {
@@ -2514,14 +2741,15 @@ $('#import-csv').addEventListener('change', e => {
    Global events
    ========================================================= */
 let toastTimer;
-function toast(msg, undo, done) {
+function toast(msg, undo, done, tip) {
   const t = $('#toast');
-  t.innerHTML = `${done ? `<span class="tcheck">${icon('check')}</span>` : ''}<span class="tmsg">${esc(msg)}</span>${undo ? '<button class="undo">Отменить</button>' : ''}`;
+  t.innerHTML = `${done ? `<span class="tcheck">${icon('check')}</span>` : ''}<span class="tmsg">${esc(msg)}${tip ? `<small class="ttip">${icon('lightbulb')}<span>${esc(tip)}</span></small>` : ''}</span>${undo ? '<button class="undo">Отменить</button>' : ''}`;
+  t.classList.toggle('has-tip', !!tip);
   t.classList.toggle('has-undo', !!undo);
   t.hidden = false;
   if (undo) t.querySelector('.undo').onclick = () => { undo(); toast('Отменено'); };
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (t.hidden = true), undo ? 5000 : 1800);
+  toastTimer = setTimeout(() => (t.hidden = true), tip ? 7000 : undo ? 5000 : 1800);
 }
 
 const ACTIONS = {
@@ -2574,6 +2802,7 @@ const ACTIONS = {
   'dep-no': () => { S.plan.depAsked = true; save(); render(); },
   debts: el => { clearSel(); openDebts(el.dataset.dir); },
   voice: () => { clearSel(); openVoice(); },
+  story: el => { clearSel(); openStory(+el.dataset.i); },
   ai: () => openAISettings(),
   reset: () => {
     if (!confirm('Стереть ВСЕ данные?\n\nСовет: сначала сохраните копию.')) return;
