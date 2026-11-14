@@ -127,6 +127,16 @@ const pref = {
   set(k, v) { try { localStorage.setItem('mt.' + k, JSON.stringify(v)); } catch (e) { /* ignore */ } },
 };
 
+// index.html sets the theme before the first paint; this keeps it and the status bar colour in sync
+function applyTheme() {
+  const t = pref.get('theme', 'dark');
+  document.documentElement.dataset.theme = t;
+  const dark = t === 'dark' || (t === 'system' && !matchMedia('(prefers-color-scheme: light)').matches);
+  $('meta[name="theme-color"]')?.setAttribute('content', dark ? '#0b0b0f' : '#f2f3f5');
+}
+applyTheme();
+matchMedia('(prefers-color-scheme: light)').addEventListener?.('change', applyTheme);
+
 let S = normalize(load() || seed());
 save();
 navigator.storage?.persist?.().catch(() => {});
@@ -324,15 +334,34 @@ function setTab(tab) {
 /* =========================================================
    Home
    ========================================================= */
-function tile(kind, it, amount, extra = '', amtCls = '') {
+function tile(kind, it, amount, amtCls = '') {
   return `<button class="tile" data-kind="${kind}" data-id="${it.id}" style="--c:${it.color}">
     <span class="coin">${icon(it.icon)}</span>
-    <span class="tname">${esc(it.name)}</span>
-    <span class="tamt ${amtCls}">${fmtShort(amount)}</span>${extra}
+    <span class="tmeta"><span class="tname">${esc(it.name)}</span><span class="tamt ${amtCls}">${fmtShort(amount)}</span></span>
   </button>`;
 }
-const addTile = kind =>
-  `<button class="tile add" data-act="new" data-kind="${kind}"><span class="coin">${icon('plus')}</span><span class="tname">Добавить</span><span class="tamt">&nbsp;</span></button>`;
+
+// Category: the ring fills up as the month's limit is used; without a limit it stays an empty track.
+const RING_C = 2 * Math.PI * 28;
+function catTile(c, spent, limit) {
+  const pct = limit > 0 ? Math.min(1, spent / limit) : 0;
+  const over = limit > 0 && spent > limit;
+  const k = n => compact(n).replace(' тыс', '');
+  let label, cls = '';
+  if (over) { label = `+${compact(spent - limit)} сверх`; cls = 'over'; }
+  else if (limit > 0) label = `${k(spent)} из ${compact(limit)}`;
+  else { label = fmtShort(spent); cls = spent ? '' : 'zero'; }
+  return `<button class="tile cat" data-kind="category" data-id="${c.id}" style="--c:${c.color}">
+    <span class="ring ${over ? 'over' : ''}"><svg viewBox="0 0 62 62" width="62" height="62" aria-hidden="true"><circle class="trk" cx="31" cy="31" r="28"/>${pct > 0 ? `<circle class="arc" cx="31" cy="31" r="28" stroke-dasharray="${(pct * RING_C).toFixed(1)} ${RING_C.toFixed(1)}"/>` : ''}</svg>
+    <span class="coin">${icon(c.icon)}</span></span>
+    <span class="tname">${esc(c.name)}</span>
+    <span class="tamt ${cls}">${label}</span>
+  </button>`;
+}
+
+const addTile = kind => kind === 'category'
+  ? `<button class="tile cat add" data-act="new" data-kind="category"><span class="ring"><span class="coin">${icon('plus')}</span></span><span class="tname">Добавить</span><span class="tamt">&nbsp;</span></button>`
+  : `<button class="tile add" data-act="new" data-kind="${kind}"><span class="coin">${icon('plus')}</span><span class="tmeta"><span class="tname">Добавить</span><span class="tamt">&nbsp;</span></span></button>`;
 
 function renderHome() {
   const bal = balances();
@@ -345,43 +374,36 @@ function renderHome() {
   if (UI.sort === 'asc') cats.sort((a, b) => (s.exp[a.id] || 0) - (s.exp[b.id] || 0));
   const sortLabel = { manual: ['list', 'Мой порядок'], desc: ['arrow-down-wide-narrow', 'Сначала большие'], asc: ['arrow-up-narrow-wide', 'Сначала малые'] }[UI.sort];
 
+  // wallets left out of the plan (deposits, savings) are shown apart from the money you can spend
+  const saved = S.wallets.filter(w => S.plan.exclude.includes(w.id));
+  const savedSum = saved.reduce((a, w) => a + (bal[w.id] || 0), 0);
+  const duo = saved.length ? `<div class="duo">
+      <div><span>${icon('credit-card')}Доступно</span><b>${fmt(totalBal - savedSum)}</b><small>карты и наличные</small></div>
+      <div><span>${icon('piggy-bank')}Накоплено</span><b>${fmt(savedSum)}</b><small>${esc(saved.map(w => w.name).join(', '))}</small></div>
+    </div>` : '';
+
   view.innerHTML = `
     ${planCard()}
+    ${duo}
     ${quickBlock()}
-    <section class="sec">
-      <div class="sec-head"><div class="left"><h3>Доходы</h3><div class="total">${fmt(s.totalInc)}</div></div></div>
-      <div class="row">
-        ${S.incomes.map(i => tile('income', i, s.inc[i.id] || 0, '', s.inc[i.id] ? '' : 'zero')).join('')}
-        ${addTile('income')}
-      </div>
-    </section>
+    <div class="h2row"><h2>Доходы</h2><span class="total">${fmt(s.totalInc)}</span></div>
+    <div class="row">
+      ${S.incomes.map(i => tile('income', i, s.inc[i.id] || 0, s.inc[i.id] ? '' : 'zero')).join('')}
+      ${addTile('income')}
+    </div>
 
-    <section class="sec">
-      <div class="sec-head"><div class="left"><h3>Кошельки</h3><div class="total">${fmt(totalBal)}</div></div></div>
-      <div class="row">
-        ${S.wallets.map(w => tile('wallet', w, bal[w.id] || 0, '', (bal[w.id] || 0) < 0 ? 'neg' : '')).join('')}
-        ${addTile('wallet')}
-      </div>
-    </section>
+    <div class="h2row"><h2>Кошельки</h2><span class="total">${fmt(totalBal)}</span></div>
+    <div class="row">
+      ${S.wallets.map(w => tile('wallet', w, bal[w.id] || 0, (bal[w.id] || 0) < 0 ? 'neg' : '')).join('')}
+      ${addTile('wallet')}
+    </div>
 
-    <section class="sec">
-      <div class="sec-head">
-        <div class="left"><h3>Расходы</h3><div class="total">${fmt(s.totalExp)}</div></div>
-        <button class="sort-btn" data-act="sort">${icon(sortLabel[0])}${sortLabel[1]}</button>
-      </div>
-      <div class="grid">
-        ${cats.map(c => {
-          const spent = s.exp[c.id] || 0;
-          let extra = '';
-          if (c.budget > 0 && P.mode === 'month') {
-            const pct = Math.min(100, (spent / c.budget) * 100);
-            extra = `<span class="bud ${spent > c.budget ? 'over' : ''}"><i style="width:${pct}%"></i></span>`;
-          }
-          return tile('category', c, spent, extra, spent ? '' : 'zero');
-        }).join('')}
-        ${addTile('category')}
-      </div>
-    </section>`;
+    <div class="h2row"><h2>Расходы</h2><span class="total">${fmt(s.totalExp)}</span>
+      <button class="sort-btn" data-act="sort">${icon(sortLabel[0])}${sortLabel[1]}</button></div>
+    <div class="grid">
+      ${cats.map(c => catTile(c, s.exp[c.id] || 0, P.mode === 'month' ? c.budget : 0)).join('')}
+      ${addTile('category')}
+    </div>`;
   if (UI.sel) applySel();
 }
 
@@ -390,18 +412,15 @@ function planCard() {
   if (!p) return '';
   const over = p.leftToday < 0;
   const pct = p.limit > 0 ? Math.min(100, (p.spentToday / p.limit) * 100) : 100;
-  let note;
+  let note = '';
   if (p.free <= 0) note = `Не хватает ${fmt(-p.free)} на ${p.unpaid.length ? 'платежи' : 'запас'} до ${shortDate(p.end)}.`;
   else if (over && p.tomorrow !== null) note = `Перерасход ${fmt0(-p.leftToday)} — завтра лимит станет ${fmt0(p.tomorrow)}.`;
-  else note = `${fmt0(p.limit)} в день · до зарплаты ${p.daysLeft} ${plural(p.daysLeft, DAYS)} (${shortDate(p.end)})`;
   return `<section class="sec plan" data-act="plan">
-    <div class="plan-top">
-      <div><div class="plan-label">${over ? 'Перерасход сегодня' : 'Можно потратить сегодня'}</div>
-      <div class="plan-big ${over || p.free <= 0 ? 'neg' : 'ok'}">${fmt0(over ? -p.leftToday : p.leftToday)}</div></div>
-      <div class="plan-right"><span>До ${shortDate(p.end)}</span><b>${fmt(Math.max(0, p.free))}</b></div>
-    </div>
+    <div class="plan-label">${over ? 'Перерасход сегодня' : 'Можно потратить сегодня'}</div>
+    <div class="plan-big ${over || p.free <= 0 ? 'neg' : ''}">${fmt0(over ? -p.leftToday : p.leftToday)}</div>
     <div class="bar plan-bar ${over ? 'over' : ''}"><i style="width:${pct}%"></i></div>
-    <div class="plan-note">${note}</div>
+    <div class="plan-meta"><span>${p.daysLeft} ${plural(p.daysLeft, DAYS)} до зарплаты · ${shortDate(p.end)}</span><span>${fmt0(p.limit)} в день</span></div>
+    ${note ? `<div class="plan-note">${note}</div>` : ''}
     ${p.unpaid.length ? (() => {
       const nx = p.unpaid[0], late = nx.due < p.today;
       return `<div class="plan-bills ${late ? 'late' : ''}">${icon('lock')}<span>${fmt(p.billsLeft)} отложено на ${p.unpaid.length} ${plural(p.unpaid.length, ['платёж', 'платежа', 'платежей'])} · ${late ? 'просрочен' : 'ближайший'}: ${esc(nx.b.name)}, ${shortDate(nx.due)}</span></div>`;
@@ -442,8 +461,8 @@ function quickBlock() {
       <span class="qtext"><b>${esc(e.sub || cat.name)}</b><small>${fmt(e.amount)} · ${e.n}×</small></span>
     </button>`;
   }).join('');
-  return `<section class="sec quick">
-    <div class="sec-head"><h3>Быстрые траты</h3>${S.quick.length ? `<button class="sort-btn" data-act="quick-manage">${icon('pencil')}Настроить</button>` : ''}</div>
+  return `<section class="quick">
+    <div class="h2row"><h2>Быстрые траты</h2>${S.quick.length ? `<button class="sort-btn" data-act="quick-manage">${icon('pencil')}Настроить</button>` : ''}</div>
     <div class="row qrow">
       ${chips}${suggChips}
       <button class="qchip add" data-act="quick-new"><span class="qcoin">${icon('plus')}</span><span class="qtext"><b>${S.quick.length ? 'Ещё' : 'Создать'}</b><small>одно касание</small></span></button>
@@ -1607,6 +1626,12 @@ function renderSettings() {
     </div>
     <div class="set-note">План показывает, сколько можно потратить сегодня, чтобы денег хватило до зарплаты.</div>
 
+    <div class="group-title">Оформление</div>
+    <div class="seg theme-seg">
+      ${[['dark', 'Тёмная'], ['light', 'Светлая'], ['system', 'Как в системе']].map(([k, n]) =>
+        `<button data-act="theme" data-theme="${k}" class="${pref.get('theme', 'dark') === k ? 'on' : ''}">${n}</button>`).join('')}
+    </div>
+
     <div class="group-title">Резервная копия</div>
     <div class="set-list">
       <button class="set-row" data-act="export">${icon('download')}Сохранить копию<small>${S.tx.length} ${plural(S.tx.length, ['запись', 'записи', 'записей'])}</small></button>
@@ -1634,7 +1659,7 @@ function renderSettings() {
     <div class="set-list">
       <button class="set-row danger" data-act="reset">${icon('trash-2')}Стереть все данные</button>
     </div>
-    <div class="set-note">Деньги · v1.1 · работает без интернета</div>`;
+    <div class="set-note">Деньги · v1.2 · работает без интернета</div>`;
 }
 
 async function exportData() {
@@ -1862,6 +1887,7 @@ const ACTIONS = {
   export: exportData,
   import: () => $('#import-file').click(),
   'import-csv': () => $('#import-csv').click(),
+  theme: el => { pref.set('theme', el.dataset.theme); applyTheme(); render(); },
   reset: () => {
     if (!confirm('Стереть ВСЕ данные?\n\nСовет: сначала сохраните копию.')) return;
     const undo = snapshot();
