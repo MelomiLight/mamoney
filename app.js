@@ -844,8 +844,8 @@ function openPlan() {
     <div class="set-card">
       <div class="field"><span>Показывать на главной</span><input type="checkbox" id="p-on" class="switch" ${p.on ? 'checked' : ''}></div>
       <div class="field col"><span>Дни зарплаты</span>
-        <div class="daygrid" id="p-days">${Array.from({ length: 31 }, (_, i) => `<button type="button" data-d="${i + 1}" class="${paydays.has(i + 1) ? 'on' : ''}">${i + 1}</button>`).join('')}</div>
-        <span class="hint">Отметьте один или несколько дней. 31 — последний день любого месяца.</span>
+        <div class="cal" id="p-days"></div>
+        <span class="hint">Нажмите на число — зарплата будет приходить в этот день каждый месяц. Можно отметить несколько.</span>
       </div>
       <div class="field"><span>Оставлять в конце периода</span><input id="p-res" inputmode="decimal" placeholder="0 ₸" value="${p.reserve || ''}" enterkeyhint="done"></div>
       <div class="field col"><span>Какие кошельки учитывать</span>
@@ -855,12 +855,48 @@ function openPlan() {
     </div>
     <div class="actions"><button class="btn primary" id="p-save">Сохранить</button></div>`);
 
+  // A month calendar: paydays repeat every month, so a tap picks the day of the month; «31» means the last day
+  let calM = monthOf();
+  const paintCal = () => {
+    const y = calM.getFullYear(), m = calM.getMonth(), dim = daysIn(calM);
+    const lead = (new Date(y, m, 1).getDay() + 6) % 7; // Monday first
+    const marked = new Set([...paydays].map(d => Math.min(d, dim)));
+    const isToday = d => y === now.getFullYear() && m === now.getMonth() && d === now.getDate();
+    let cells = '';
+    for (let i = 0; i < lead; i++) cells += '<i></i>';
+    for (let d = 1; d <= dim; d++) {
+      const wk = (lead + d - 1) % 7 >= 5;
+      cells += `<button type="button" data-d="${d}" class="${marked.has(d) ? 'on' : ''} ${wk ? 'wk' : ''} ${isToday(d) ? 'today' : ''}">${d}</button>`;
+    }
+    // the next payday from today with the days picked right now
+    let next = null;
+    for (let k = 0; k <= 2 && !next; k++) {
+      const mm = monthOf(k), dd = daysIn(mm);
+      const c = [...paydays].map(d => new Date(mm.getFullYear(), mm.getMonth(), Math.min(d, dd))).sort((a, b) => a - b)
+        .find(x => x >= new Date(now.getFullYear(), now.getMonth(), now.getDate()));
+      if (c) next = c;
+    }
+    const wd = next && next.toLocaleDateString('ru-RU', { weekday: 'short' });
+    const off = next && (next.getDay() === 0 || next.getDay() === 6);
+    $('#p-days', sh).innerHTML = `
+      <div class="cal-head"><button type="button" class="icon-btn" data-cm="-1" aria-label="Предыдущий месяц">${icon('chevron-left')}</button>
+        <b>${MONTHS[m]}${y !== now.getFullYear() ? ' ' + y : ''}</b>
+        <button type="button" class="icon-btn" data-cm="1" aria-label="Следующий месяц">${icon('chevron-right')}</button></div>
+      <div class="cal-grid">${['пн', 'вт', 'ср', 'чт', 'пт', 'сб', 'вс'].map(n => `<span>${n}</span>`).join('')}${cells}</div>
+      <button type="button" class="chip ${paydays.has(31) ? 'on' : ''}" data-d="31" data-last="1">Последний день месяца</button>
+      <div class="cal-next">${next ? `Следующая зарплата: <b>${wd}, ${next.getDate()} ${MON_GEN[next.getMonth()]}</b>${off ? ' — выходной, деньги могут прийти раньше' : ''}` : 'Отметьте хотя бы один день'}</div>`;
+  };
+  paintCal();
   $('#p-days', sh).onclick = e => {
+    const nav = e.target.closest('[data-cm]');
+    if (nav) { calM = new Date(calM.getFullYear(), calM.getMonth() + +nav.dataset.cm, 1); return paintCal(); }
     const b = e.target.closest('[data-d]');
     if (!b) return;
-    const d = +b.dataset.d;
+    let d = +b.dataset.d;
+    // the last day of a short month stands for «the last day» when that's what's already picked
+    if (!b.dataset.last && d === daysIn(calM) && d < 31 && paydays.has(31)) d = 31;
     paydays.has(d) ? paydays.delete(d) : paydays.add(d);
-    b.classList.toggle('on');
+    paintCal();
   };
   $('#bill-add', sh).onclick = () => openBill();
   $('#p-summary', sh)?.addEventListener('click', () => openSummary(prevPayPeriod(payPeriod())));
@@ -1663,7 +1699,9 @@ function openItem(kind, id, pre = {}) {
     $('#i-icons', sh).style.setProperty('--sel', it.color);
   };
   paint();
-  $('#i-icons button.on', sh)?.scrollIntoView({ block: 'nearest' });
+  // show the chosen icon inside the grid's own scroll — scrollIntoView would also scroll the whole sheet down to it
+  const grid = $('#i-icons', sh), onIcon = $('button.on', grid);
+  if (onIcon) grid.scrollTop = onIcon.offsetTop - 8;
   $('#i-recon', sh)?.addEventListener('click', () => openReconcile(id));
   fName.oninput = paint;
   $('#i-colors', sh).onclick = e => { const b = e.target.closest('[data-color]'); if (b) { it.color = b.dataset.color; paint(); } };
