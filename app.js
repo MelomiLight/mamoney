@@ -10,6 +10,15 @@ const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 
 const pad = n => String(n).padStart(2, '0');
 const ymd = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 const today = () => ymd(new Date());
+// dark or white ink, whichever reads better on the colour
+const onColor = hex => {
+  const n = parseInt(String(hex).slice(1), 16);
+  if (Number.isNaN(n)) return '#fff';
+  const lin = v => { v /= 255; return v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4; };
+  const L = .2126 * lin(n >> 16 & 255) + .7152 * lin(n >> 8 & 255) + .0722 * lin(n & 255);
+  return L > .3 ? '#111114' : '#ffffff';
+};
+const cv = color => `--c:${color};--on:${onColor(color)}`;
 const icon = (name, cls = '') =>
   `<svg class="i ${cls}" viewBox="0 0 24 24">${ICONS[name] || ICONS['circle-dollar-sign']}</svg>`;
 
@@ -48,7 +57,7 @@ const COLORS = ['#ef4444', '#f97316', '#f59e0b', '#eab308', '#84cc16', '#22c55e'
   '#d946ef', '#ec4899', '#f43f5e', '#a16207', '#78716c', '#64748b', '#334155'];
 
 const UI_ICONS = new Set(['plus', 'x', 'chevron-left', 'chevron-right', 'list', 'chart-pie', 'settings',
-  'arrow-down-wide-narrow', 'arrow-up-narrow-wide', 'arrow-right', 'trash-2', 'download', 'upload', 'check', 'search']);
+  'arrow-down-wide-narrow', 'arrow-up-narrow-wide', 'arrow-right', 'trash-2', 'download', 'upload', 'check', 'search', 'arrow-down']);
 const PICKER_ICONS = Object.keys(ICONS).filter(n => !UI_ICONS.has(n));
 
 /* kinds: income source → wallet → category.
@@ -155,6 +164,7 @@ function snapshot() {
 const now = new Date();
 const UI = {
   tab: 'home',
+  animate: true, // rings and bars grow in when the home screen opens
   period: { mode: pref.get('mode', 'month'), y: now.getFullYear(), m: now.getMonth() },
   sort: pref.get('sort', 'manual'),
   sel: null,
@@ -327,6 +337,7 @@ function setTab(tab) {
   clearSel();
   hideTip();
   UI.tab = tab;
+  UI.animate = tab === 'home';
   render();
   view.scrollTop = 0;
 }
@@ -335,33 +346,37 @@ function setTab(tab) {
    Home
    ========================================================= */
 function tile(kind, it, amount, amtCls = '') {
-  return `<button class="tile" data-kind="${kind}" data-id="${it.id}" style="--c:${it.color}">
-    <span class="coin">${icon(it.icon)}</span>
-    <span class="tmeta"><span class="tname">${esc(it.name)}</span><span class="tamt ${amtCls}">${fmtShort(amount)}</span></span>
+  if (kind === 'income') return `<button class="tile inc" data-kind="income" data-id="${it.id}" style="${cv(it.color)}">
+    <span class="coin">${icon('arrow-down')}</span><span class="tname">${esc(it.name)}</span><span class="tamt ${amtCls}">${amount ? compact(amount) : '0'}</span>
+  </button>`;
+  return `<button class="tile wal" data-kind="${kind}" data-id="${it.id}" style="${cv(it.color)}">
+    <span class="whead"><span class="coin">${icon(it.icon)}</span><span class="tname">${esc(it.name)}</span></span>
+    <span class="tamt ${amtCls}">${fmtShort(amount)}</span>
   </button>`;
 }
 
 // Category: the ring fills up as the month's limit is used; without a limit it stays an empty track.
-const RING_C = 2 * Math.PI * 28;
+const RING_C = 2 * Math.PI * 29;
 function catTile(c, spent, limit) {
   const pct = limit > 0 ? Math.min(1, spent / limit) : 0;
   const over = limit > 0 && spent > limit;
-  const k = n => compact(n).replace(' тыс', '');
   let label, cls = '';
   if (over) { label = `+${compact(spent - limit)} сверх`; cls = 'over'; }
-  else if (limit > 0) label = `${k(spent)} из ${compact(limit)}`;
+  else if (limit > 0) label = `ещё ${compact(limit - spent)}`;
   else { label = fmtShort(spent); cls = spent ? '' : 'zero'; }
-  return `<button class="tile cat" data-kind="category" data-id="${c.id}" style="--c:${c.color}">
-    <span class="ring ${over ? 'over' : ''}"><svg viewBox="0 0 62 62" width="62" height="62" aria-hidden="true"><circle class="trk" cx="31" cy="31" r="28"/>${pct > 0 ? `<circle class="arc" cx="31" cy="31" r="28" stroke-dasharray="${(pct * RING_C).toFixed(1)} ${RING_C.toFixed(1)}"/>` : ''}</svg>
+  return `<button class="tile cat ${UI.bump === c.id ? 'bump' : ''}" data-kind="category" data-id="${c.id}" style="${cv(c.color)}">
+    <span class="ring ${over ? 'over' : ''}"><svg viewBox="0 0 64 64" width="64" height="64" aria-hidden="true"><circle class="trk" cx="32" cy="32" r="29"/>${pct > 0 && !over ? `<circle class="arc" cx="32" cy="32" r="29" style="--len:${(pct * RING_C).toFixed(1)}" stroke-dasharray="${(pct * RING_C).toFixed(1)} ${RING_C.toFixed(1)}"/>` : ''}</svg>
     <span class="coin">${icon(c.icon)}</span></span>
     <span class="tname">${esc(c.name)}</span>
     <span class="tamt ${cls}">${label}</span>
   </button>`;
 }
 
-const addTile = kind => kind === 'category'
-  ? `<button class="tile cat add" data-act="new" data-kind="category"><span class="ring"><span class="coin">${icon('plus')}</span></span><span class="tname">Добавить</span><span class="tamt">&nbsp;</span></button>`
-  : `<button class="tile add" data-act="new" data-kind="${kind}"><span class="coin">${icon('plus')}</span><span class="tmeta"><span class="tname">Добавить</span><span class="tamt">&nbsp;</span></span></button>`;
+const addTile = kind => ({
+  category: `<button class="tile cat add" data-act="new" data-kind="category"><span class="ring"><span class="coin">${icon('plus')}</span></span><span class="tname">Добавить</span><span class="tamt">&nbsp;</span></button>`,
+  income: `<button class="tile inc add" data-act="new" data-kind="income" aria-label="Добавить источник дохода"><span class="coin">${icon('plus')}</span></button>`,
+  wallet: `<button class="tile wal add" data-act="new" data-kind="wallet"><span class="whead"><span class="coin">${icon('plus')}</span><span class="tname">Добавить</span></span><span class="tamt">&nbsp;</span></button>`,
+})[kind];
 
 function renderHome() {
   const bal = balances();
@@ -374,27 +389,23 @@ function renderHome() {
   if (UI.sort === 'asc') cats.sort((a, b) => (s.exp[a.id] || 0) - (s.exp[b.id] || 0));
   const sortLabel = { manual: ['list', 'Мой порядок'], desc: ['arrow-down-wide-narrow', 'Сначала большие'], asc: ['arrow-up-narrow-wide', 'Сначала малые'] }[UI.sort];
 
-  // wallets left out of the plan (deposits, savings) are shown apart from the money you can spend
-  const saved = S.wallets.filter(w => S.plan.exclude.includes(w.id));
-  const savedSum = saved.reduce((a, w) => a + (bal[w.id] || 0), 0);
-  const duo = saved.length ? `<div class="duo">
-      <div><span>${icon('credit-card')}Доступно</span><b>${fmt(totalBal - savedSum)}</b><small>карты и наличные</small></div>
-      <div><span>${icon('piggy-bank')}Накоплено</span><b>${fmt(savedSum)}</b><small>${esc(saved.map(w => w.name).join(', '))}</small></div>
-    </div>` : '';
+  const spentToday = S.tx.filter(t => t.type === 'expense' && t.date === today()).reduce((a, t) => a + t.amount, 0);
+  const anim = UI.animate ? 'anim' : '';
+  UI.animate = false;
 
-  view.innerHTML = `
+  view.innerHTML = `<div class="${anim}">
+    <div class="today-line">Сегодня потрачено <b>${fmt(spentToday)}</b></div>
     ${planCard()}
-    ${duo}
     ${quickBlock()}
     <div class="h2row"><h2>Доходы</h2><span class="total">${fmt(s.totalInc)}</span></div>
-    <div class="row">
-      ${S.incomes.map(i => tile('income', i, s.inc[i.id] || 0, s.inc[i.id] ? '' : 'zero')).join('')}
+    <div class="row irow">
+      ${S.incomes.map(i => tile('income', i, s.inc[i.id] || 0)).join('')}
       ${addTile('income')}
     </div>
 
     <div class="h2row"><h2>Кошельки</h2><span class="total">${fmt(totalBal)}</span></div>
     <div class="row">
-      ${S.wallets.map(w => tile('wallet', w, bal[w.id] || 0, (bal[w.id] || 0) < 0 ? 'neg' : '')).join('')}
+      ${S.wallets.map(w => tile('wallet', w, bal[w.id] || 0)).join('')}
       ${addTile('wallet')}
     </div>
 
@@ -403,29 +414,78 @@ function renderHome() {
     <div class="grid">
       ${cats.map(c => catTile(c, s.exp[c.id] || 0, P.mode === 'month' ? c.budget : 0)).join('')}
       ${addTile('category')}
-    </div>`;
+    </div></div>`;
+  UI.bump = null;
+  countUp();
   if (UI.sel) applySel();
+}
+
+// Daily spending for the last 14 days, oldest first (bill payments excluded, like the limit)
+function spendDays(n = 14) {
+  const out = [];
+  for (let k = n - 1; k >= 0; k--) out.push(ymd(new Date(now.getFullYear(), now.getMonth(), now.getDate() - k)));
+  const by = Object.fromEntries(out.map(d => [d, 0]));
+  for (const t of S.tx) if (t.type === 'expense' && !t.bill && t.date in by) by[t.date] += t.amount;
+  return out.map(d => by[d]);
+}
+
+// Yesterday's limit by the same rule: the money left at the end of yesterday plus what was spent yesterday,
+// spread over the days that were left then. null when yesterday belongs to the previous pay period.
+function yesterdayLimit(p) {
+  const y = new Date(p.today.getFullYear(), p.today.getMonth(), p.today.getDate() - 1);
+  if (y < p.start) return null;
+  const ys = ymd(y), tdy = ymd(p.today);
+  const counted_ = id => !S.plan.exclude.includes(id) && !!find('wallet', id);
+  let spentY = 0;
+  for (const t of S.tx) if (t.date === ys && !t.bill && ((t.type === 'expense' && counted_(t.from)) ||
+    (t.type === 'transfer' && counted_(t.from) && !counted_(t.to)))) spentY += t.amount;
+  const freeY = countedBalance(balances(tdy)) - S.plan.reserve - p.billsLeft;
+  return Math.max(0, (freeY + spentY) / (p.daysLeft + 1));
 }
 
 function planCard() {
   const p = planInfo();
   if (!p) return '';
   const over = p.leftToday < 0;
-  const pct = p.limit > 0 ? Math.min(100, (p.spentToday / p.limit) * 100) : 100;
+  const state = over || p.free <= 0 ? 'over' : p.limit > 0 && p.leftToday < p.limit * .2 ? 'warn' : '';
   let note = '';
   if (p.free <= 0) note = `Не хватает ${fmt(-p.free)} на ${p.unpaid.length ? 'платежи' : 'запас'} до ${shortDate(p.end)}.`;
-  else if (over && p.tomorrow !== null) note = `Перерасход ${fmt0(-p.leftToday)} — завтра лимит станет ${fmt0(p.tomorrow)}.`;
-  return `<section class="sec plan" data-act="plan">
+  else if (over && p.tomorrow !== null) note = `Завтра лимит станет ${fmt0(p.tomorrow)}.`;
+  else if (state === 'warn') note = `Потрачено ${fmt0(p.spentToday)} из ${fmt0(p.limit)}`;
+  const yl = yesterdayLimit(p);
+  const d = yl === null ? 0 : Math.round(p.limit) - Math.round(yl);
+  const delta = !over && Math.abs(d) >= 1
+    ? `<div class="plan-delta ${d < 0 ? 'down' : ''}">${d > 0 ? '+' : '−'}${fmt0(Math.abs(d))} к вчерашнему лимиту</div>` : '';
+  const days = spendDays(), top = Math.max(...days, 1);
+  return `<section class="sec plan ${state}" data-act="plan">
     <div class="plan-label">${over ? 'Перерасход сегодня' : 'Можно потратить сегодня'}</div>
-    <div class="plan-big ${over || p.free <= 0 ? 'neg' : ''}">${fmt0(over ? -p.leftToday : p.leftToday)}</div>
-    <div class="bar plan-bar ${over ? 'over' : ''}"><i style="width:${pct}%"></i></div>
-    <div class="plan-meta"><span>${p.daysLeft} ${plural(p.daysLeft, DAYS)} до зарплаты · ${shortDate(p.end)}</span><span>${fmt0(p.limit)} в день</span></div>
+    <div class="plan-big" data-count="${Math.round(over ? -p.leftToday : p.leftToday)}">${fmt0(over ? -p.leftToday : p.leftToday)}</div>
+    ${delta}
+    <div class="spark-head"><span>Траты за 14 дней</span><span>сегодня</span></div>
+    <div class="spark">${days.map((v, i) => `<i class="${i === days.length - 1 ? 'now' : ''}" style="height:${Math.max(4, (v / top) * 100)}%;animation-delay:${i * 18}ms"></i>`).join('')}</div>
+    <div class="plan-meta"><span>${p.daysLeft} ${plural(p.daysLeft, DAYS)} до зарплаты · ${shortDate(p.end)}</span><span>≈ ${fmt0(p.limit)} в день</span></div>
     ${note ? `<div class="plan-note">${note}</div>` : ''}
     ${p.unpaid.length ? (() => {
       const nx = p.unpaid[0], late = nx.due < p.today;
       return `<div class="plan-bills ${late ? 'late' : ''}">${icon('lock')}<span>${fmt(p.billsLeft)} отложено на ${p.unpaid.length} ${plural(p.unpaid.length, ['платёж', 'платежа', 'платежей'])} · ${late ? 'просрочен' : 'ближайший'}: ${esc(nx.b.name)}, ${shortDate(nx.due)}</span></div>`;
     })() : ''}
   </section>`;
+}
+
+// The limit rolls to its new value instead of jumping
+function countUp() {
+  const el = $('.plan-big[data-count]', view);
+  if (!el) return;
+  const to = +el.dataset.count, from = UI.shown ?? to;
+  UI.shown = to;
+  if (from === to || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const t0 = performance.now(), dur = 450;
+  const step = t => {
+    const k = Math.min(1, (t - t0) / dur), e = 1 - (1 - k) ** 3;
+    el.textContent = fmt0(from + (to - from) * e);
+    if (k < 1 && el.isConnected) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
 }
 
 /* ---------- quick spends (one-tap templates) ---------- */
@@ -449,14 +509,14 @@ function quickBlock() {
   const sugg = quickSuggestions();
   const chips = S.quick.map(q => {
     const cat = findOr('category', q.to);
-    return `<button class="qchip" data-act="quick" data-id="${q.id}" style="--c:${cat.color}">
+    return `<button class="qchip" data-act="quick" data-id="${q.id}" style="${cv(cat.color)}">
       <span class="qcoin">${icon(cat.icon)}</span>
       <span class="qtext"><b>${esc(q.name)}</b><small>${q.amount ? fmt(q.amount) : 'сумма?'}</small></span>
     </button>`;
   }).join('');
   const suggChips = sugg.map((e, i) => {
     const cat = findOr('category', e.to);
-    return `<button class="qchip sugg" data-act="quick-sugg" data-i="${i}" style="--c:${cat.color}">
+    return `<button class="qchip sugg" data-act="quick-sugg" data-i="${i}" style="${cv(cat.color)}">
       <span class="qcoin">${icon('plus')}</span>
       <span class="qtext"><b>${esc(e.sub || cat.name)}</b><small>${fmt(e.amount)} · ${e.n}×</small></span>
     </button>`;
@@ -479,9 +539,10 @@ function useQuick(id) {
   if (!q.amount) return openTx({ type: 'expense', from, to: q.to, sub: q.sub });
   const undo = snapshot();
   S.tx.push({ id: uid(), type: 'expense', from, to: q.to, amount: q.amount, date: today(), sub: q.sub || '', note: '', ts: Date.now() });
+  UI.bump = q.to;
   save();
   render();
-  toast(`${q.name}: −${fmt(q.amount)}`, undo);
+  toast(`${q.name}: −${fmt(q.amount)}`, undo, true);
 }
 
 function openQuick(id, pre) {
@@ -532,7 +593,7 @@ function openQuickList() {
     <div class="list bills">${S.quick.map((q, i) => {
       const cat = findOr('category', q.to);
       return `<div class="bill-row" data-q="${q.id}">
-        <span class="coin" style="--c:${cat.color}">${icon(cat.icon)}</span>
+        <span class="coin" style="${cv(cat.color)}">${icon(cat.icon)}</span>
         <span class="tx-main"><div class="tx-title">${esc(q.name)}</div><div class="tx-sub">${esc(cat.name)} · ${esc(findOr('wallet', q.from).name)}</div></span>
         <b class="tx-amt">${q.amount ? fmt(q.amount) : '—'}</b>
         <span class="order-mini">
@@ -576,7 +637,7 @@ function billsBlock(info) {
     if (o) st = billStatus(o, info);
     else st = { cls: 'later', text: info ? `След. период · ${shortDate(nextDue(b, info.end))}` : `Каждое ${b.day}-е число` };
     return `<div class="bill-row" data-bill="${b.id}">
-      <span class="coin" style="--c:${cat.color}">${icon(cat.icon)}</span>
+      <span class="coin" style="${cv(cat.color)}">${icon(cat.icon)}</span>
       <span class="tx-main"><div class="tx-title">${esc(b.name)}</div><div class="tx-sub ${st.cls}">${st.text}</div></span>
       <b class="tx-amt">${fmt(b.amount)}</b>
       ${o && !o.paid ? `<button class="pay-btn" data-pay="${b.id}">Оплатить</button>` : o?.paid ? `<span class="paid-ic">${icon('check')}</span>` : ''}
@@ -751,7 +812,7 @@ function openSummary(pp) {
     ${cats.length ? `<div class="label">Больше всего</div>
       ${cats.map(([id, v]) => {
         const c = findOr('category', id);
-        return `<div class="catrow" style="--c:${c.color}"><span class="coin">${icon(c.icon)}</span>
+        return `<div class="catrow" style="${cv(c.color)}"><span class="coin">${icon(c.icon)}</span>
           <span class="meta"><span class="top"><span>${esc(c.name)} ${delta(v, prev.byCat[id])}</span><b>${fmt(v)}</b></span></span></div>`;
       }).join('')}` : ''}
     <div class="actions">
@@ -829,6 +890,7 @@ function beginDrag(el) {
   const coin = el.querySelector('.coin').cloneNode(true);
   coin.classList.add('ghost');
   coin.style.setProperty('--c', el.style.getPropertyValue('--c'));
+  coin.style.setProperty('--on', el.style.getPropertyValue('--on'));
   document.body.appendChild(coin);
   D.ghost = coin;
   el.classList.add('dragging');
@@ -1058,7 +1120,7 @@ function openTx(o) {
 
   const paintFlow = () => {
     const a = findOr(fk, fFrom.value), b = findOr(tk, fTo.value);
-    const side = it => `<div class="side"><span class="coin" style="--c:${it.color}">${icon(it.icon)}</span><span>${esc(it.name)}</span></div>`;
+    const side = it => `<div class="side"><span class="coin" style="${cv(it.color)}">${icon(it.icon)}</span><span>${esc(it.name)}</span></div>`;
     $('#tx-flow', sh).innerHTML = side(a) + `<span class="arrow">${icon('arrow-right')}</span>` + side(b);
     $('#tx-bal', sh).textContent = fk === 'wallet' && find('wallet', fFrom.value)
       ? `На «${a.name}»: ${fmt(bal[fFrom.value] || 0)}` : '';
@@ -1124,10 +1186,11 @@ function openTx(o) {
     if ($('#f-quick', sh)?.checked) {
       S.quick.push({ id: uid(), name: rec.sub || findOr('category', rec.to).name, amount, from: rec.from, to: rec.to, sub: rec.sub });
     }
+    if (!ex && rec.type === 'expense') UI.bump = rec.to;
     save();
     render();
     if (o.back) o.back(); else closeSheet();
-    toast(ex ? 'Изменено' : `Записано: ${fmt(amount)}`, undo);
+    toast(ex ? 'Изменено' : `Записано: ${fmt(amount)}`, undo, !ex);
   };
   if (ex) $('#tx-del', sh).onclick = () => {
     const undo = snapshot();
@@ -1250,7 +1313,7 @@ function openItem(kind, id) {
     ${kind === 'wallet' ? `<div class="field"><span>Начальный баланс</span><input id="i-initial" inputmode="decimal" placeholder="0" value="${it.initial || ''}" enterkeyhint="done"></div>` : ''}
     ${kind === 'category' ? `<div class="field"><span>Бюджет на месяц</span><input id="i-budget" inputmode="decimal" placeholder="Нет" value="${it.budget || ''}" enterkeyhint="done"></div>` : ''}
     <div class="label">Цвет</div>
-    <div class="swatches" id="i-colors">${COLORS.map(c => `<button type="button" class="sw" data-color="${c}" style="--c:${c}" aria-label="${c}"></button>`).join('')}</div>
+    <div class="swatches" id="i-colors">${COLORS.map(c => `<button type="button" class="sw" data-color="${c}" style="${cv(c)}" aria-label="${c}"></button>`).join('')}</div>
     <div class="label">Иконка</div>
     <div class="icon-grid" id="i-icons">${PICKER_ICONS.map(n => `<button type="button" data-icon="${n}" aria-label="${n}">${icon(n)}</button>`).join('')}</div>
     ${ex && n > 1 ? `<div class="label">Порядок</div><div class="order"><button class="btn" data-move="-1">${icon('chevron-left')} Раньше</button><button class="btn" data-move="1">Позже ${icon('chevron-right')}</button></div>` : ''}
@@ -1262,7 +1325,7 @@ function openItem(kind, id) {
 
   const fName = $('#i-name', sh);
   const paint = () => {
-    $('#pv', sh).innerHTML = `<span class="coin" style="--c:${it.color}">${icon(it.icon)}</span>
+    $('#pv', sh).innerHTML = `<span class="coin" style="${cv(it.color)}">${icon(it.icon)}</span>
       <span class="pname">${esc(fName.value.trim() || 'Название')}</span>${extraInfo ? `<span class="pbal">${esc(extraInfo)}</span>` : ''}`;
     $$('.sw', sh).forEach(b => b.classList.toggle('on', b.dataset.color === it.color));
     $$('#i-icons button', sh).forEach(b => b.classList.toggle('on', b.dataset.icon === it.icon));
@@ -1343,7 +1406,7 @@ function txRow(t) {
     amt = fmt(t.amount); cls = 'mid';
   }
   return `<button class="txrow" data-act="tx" data-id="${t.id}">
-    <span class="coin" style="--c:${main.color}">${icon(main.icon)}</span>
+    <span class="coin" style="${cv(main.color)}">${icon(main.icon)}</span>
     <span class="tx-main"><div class="tx-title">${esc(title)}</div><div class="tx-sub">${esc(sub)}</div></span>
     <span class="tx-amt ${cls}">${amt}</span>
   </button>`;
@@ -1567,12 +1630,12 @@ function renderAnalytics() {
             .forEach(t => { const k = t.sub || 'Без описания'; by[k] = (by[k] || 0) + t.amount; });
           const rows = Object.entries(by).sort((a, b) => b[1] - a[1]);
           const sm = rows[0][1];
-          subs = `<div class="subs" style="--c:${c.color}">${rows.map(([n, v]) =>
+          subs = `<div class="subs" style="${cv(c.color)}">${rows.map(([n, v]) =>
             `<div class="subrow"><span>${esc(n)}</span><b>${fmt(v)}</b></div><div class="bar"><i style="width:${(v / sm) * 100}%"></i></div>`).join('')}
             ${ps && ps.exp[c.id] ? `<div class="subrow muted"><span>${cmp.label[0].toUpperCase() + cmp.label.slice(1)} было</span><b>${fmt(ps.exp[c.id])}</b></div>` : ''}</div>`;
         }
         const chg = ps ? (ps.exp[c.id] ? delta(c.v, ps.exp[c.id]) : c.id !== '_del' ? '<span class="chg new">новое</span>' : '') : '';
-        return `<button class="catrow" data-act="cat" data-id="${c.id}" style="--c:${c.color}">
+        return `<button class="catrow" data-act="cat" data-id="${c.id}" style="${cv(c.color)}">
           <span class="coin">${icon(c.icon)}</span>
           <span class="meta"><span class="top"><span>${esc(c.name)}<span class="pct">${Math.round((c.v / s.totalExp) * 100)}%</span>${chg}</span><b>${fmt(c.v)}</b></span>
           <div class="bar"><i style="width:${(c.v / max) * 100}%"></i></div></span>
@@ -1659,7 +1722,7 @@ function renderSettings() {
     <div class="set-list">
       <button class="set-row danger" data-act="reset">${icon('trash-2')}Стереть все данные</button>
     </div>
-    <div class="set-note">Деньги · v1.2 · работает без интернета</div>`;
+    <div class="set-note">Деньги · v2.0 · работает без интернета</div>`;
 }
 
 async function exportData() {
@@ -1854,9 +1917,9 @@ $('#import-csv').addEventListener('change', e => {
    Global events
    ========================================================= */
 let toastTimer;
-function toast(msg, undo) {
+function toast(msg, undo, done) {
   const t = $('#toast');
-  t.innerHTML = `<span>${esc(msg)}</span>${undo ? '<button class="undo">Отменить</button>' : ''}`;
+  t.innerHTML = `${done ? `<span class="tcheck">${icon('check')}</span>` : ''}<span class="tmsg">${esc(msg)}</span>${undo ? '<button class="undo">Отменить</button>' : ''}`;
   t.classList.toggle('has-undo', !!undo);
   t.hidden = false;
   if (undo) t.querySelector('.undo').onclick = () => { undo(); toast('Отменено'); };

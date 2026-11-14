@@ -1,7 +1,8 @@
 // Offline-first app shell. Bump VERSION when files are added or removed.
-const VERSION = 'v5';
+const VERSION = 'v6';
 const FILES = ['./', 'index.html', 'styles.css', 'app.js', 'icons.js', 'manifest.webmanifest',
-  'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png'];
+  'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png',
+  'fonts/onest-cyrillic.woff2', 'fonts/onest-cyrillic-ext.woff2', 'fonts/onest-latin.woff2', 'fonts/onest-latin-ext.woff2'];
 const NETWORK_TIMEOUT = 2500; // after this the app opens from cache — weak/no internet must never mean a white screen
 // Once the network has timed out, the rest of this launch goes straight to the cache
 let slowUntil = 0;
