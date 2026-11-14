@@ -61,9 +61,11 @@ const UI_ICONS = new Set(['plus', 'x', 'chevron-left', 'chevron-right', 'list', 
 const PICKER_ICONS = Object.keys(ICONS).filter(n => !UI_ICONS.has(n));
 
 /* kinds: income source → wallet → category.
-   tx types: income, expense, transfer, adjust (balance correction after a bank check, signed amount) */
+   tx types: income, expense, transfer, adjust (balance correction after a bank check, signed amount),
+   debt (money lent or borrowed, or paid back: signed like adjust, `debt` points at S.debts, `dk` is 'open' or 'back').
+   A wallet with `dep` is a deposit: it has a rate and maybe a goal, and is never part of the spending plan. */
 const LISTS = { income: 'incomes', wallet: 'wallets', category: 'categories' };
-const TX_KINDS = { income: ['income', 'wallet'], expense: ['wallet', 'category'], transfer: ['wallet', 'wallet'], adjust: ['wallet', 'wallet'] };
+const TX_KINDS = { income: ['income', 'wallet'], expense: ['wallet', 'category'], transfer: ['wallet', 'wallet'], adjust: ['wallet', 'wallet'], debt: ['wallet', 'wallet'] };
 const TARGETS = { income: ['wallet'], wallet: ['wallet', 'category'] };
 const txTypeFor = (src, dst) => (src === 'income' ? 'income' : dst === 'wallet' ? 'transfer' : 'expense');
 
@@ -95,6 +97,7 @@ function seed() {
     ],
     tx: [],
     quick: [],
+    debts: [],
     lastBackup: null,
   };
 }
@@ -107,6 +110,7 @@ function normalize(d) {
   d.plan.bills = d.plan.bills || [];
   d.plan.exclude = d.plan.exclude || [];
   d.quick = d.quick || [];
+  d.debts = d.debts || [];
   if ((d.v || 1) < 2) {
     // v2: the app went Russian — rename the untouched English defaults
     const RU = { Salary: 'Зарплата', Other: 'Другое', Cash: 'Наличные', Groceries: 'Продукты', Cafe: 'Кафе',
@@ -199,7 +203,7 @@ function balances(before) {
     if (t.type === 'income') add(t.to, t.amount);
     else if (t.type === 'expense') add(t.from, -t.amount);
     else if (t.type === 'transfer') { add(t.from, -t.amount); add(t.to, t.amount); }
-    else if (t.type === 'adjust') add(t.to, t.amount);
+    else if (t.type === 'adjust' || t.type === 'debt') add(t.to, t.amount);
   }
   return b;
 }
@@ -241,7 +245,12 @@ function payPeriod(ref = new Date()) {
   return { start, end, today: t };
 }
 const prevPayPeriod = pp => payPeriod(new Date(pp.start.getFullYear(), pp.start.getMonth(), pp.start.getDate() - 1));
-const counted = id => !S.plan.exclude.includes(id) && !!find('wallet', id);
+const isDep = id => !!find('wallet', id)?.dep;
+const counted = id => !S.plan.exclude.includes(id) && !!find('wallet', id) && !isDep(id);
+// Money that leaves the plan: expenses, and transfers to wallets kept out of it. Saving into a deposit
+// isn't spending — it just leaves less for the days ahead.
+const outflow = t => !t.bill && ((t.type === 'expense' && counted(t.from)) ||
+  (t.type === 'transfer' && counted(t.from) && !counted(t.to) && !isDep(t.to)));
 const countedBalance = bal => S.wallets.filter(w => counted(w.id)).reduce((a, w) => a + (bal[w.id] || 0), 0);
 
 function planInfo() {
@@ -251,10 +260,7 @@ function planInfo() {
   if (!pp) return null;
   const balance = countedBalance(balances());
   const tdy = ymd(pp.today), startS = ymd(pp.start);
-  // money leaving the counted wallets: expenses + transfers to excluded wallets (e.g. a deposit).
   // Bill payments are planned money and corrections are past money — neither eats into today.
-  const outflow = t => !t.bill && ((t.type === 'expense' && counted(t.from)) ||
-    (t.type === 'transfer' && counted(t.from) && !counted(t.to)));
   let spentToday = 0, spentPeriod = 0;
   for (const t of S.tx) {
     if (!outflow(t)) continue;
@@ -381,7 +387,8 @@ const addTile = kind => ({
 function renderHome() {
   const bal = balances();
   const s = sums(periodTx());
-  const totalBal = S.wallets.reduce((a, w) => a + (bal[w.id] || 0), 0);
+  const wallets = S.wallets.filter(w => !w.dep);
+  const totalBal = wallets.reduce((a, w) => a + (bal[w.id] || 0), 0);
   const P = UI.period;
 
   let cats = [...S.categories];
@@ -405,7 +412,7 @@ function renderHome() {
 
     <div class="h2row"><h2>Кошельки</h2><span class="total">${fmt(totalBal)}</span></div>
     <div class="row">
-      ${S.wallets.map(w => tile('wallet', w, bal[w.id] || 0)).join('')}
+      ${wallets.map(w => tile('wallet', w, bal[w.id] || 0)).join('')}
       ${addTile('wallet')}
     </div>
 
@@ -414,10 +421,77 @@ function renderHome() {
     <div class="grid">
       ${cats.map(c => catTile(c, s.exp[c.id] || 0, P.mode === 'month' ? c.budget : 0)).join('')}
       ${addTile('category')}
-    </div></div>`;
+    </div>
+    ${depositsBlock(bal)}
+    ${debtsBlock()}</div>`;
   UI.bump = null;
   countUp();
   if (UI.sel) applySel();
+}
+
+/* ---------- deposits: a stack of cards; a tap fans it out ---------- */
+const fmtRate = r => String(r).replace('.', ',');
+const goalMonth = ym => { const [y, m] = ym.split('-').map(Number); return `${MON_GEN[m - 1]}${y !== now.getFullYear() ? ' ' + y : ''}`; };
+
+function depCard(w, bal, top) {
+  const pct = w.goalAmount > 0 ? Math.min(1, Math.max(0, bal / w.goalAmount)) : null;
+  const monthly = w.rate > 0 && bal > 0 ? (bal * w.rate) / 100 / 12 : 0;
+  return `<button class="tile dep" data-kind="wallet" data-id="${w.id}" style="${cv(w.color)}${top !== undefined ? `;top:${top}px` : ''}">
+    <span class="coin">${icon(w.icon)}</span>
+    <span class="dhead"><span class="dot"></span><span class="tname">${esc(w.name)}${w.goal ? ' · ' + esc(w.goal) : ''}</span>${w.rate ? `<span class="rate">${fmtRate(w.rate)}%</span>` : ''}</span>
+    <span class="tamt">${fmt(bal)}</span>
+    ${pct !== null ? `<span class="gbar"><i style="width:${pct * 100}%"></i></span>` : ''}
+    <span class="dmeta"><span>${pct !== null ? `<b>${Math.floor(pct * 100)}%</b> из ${fmt(w.goalAmount)}${w.goalDate ? ' · к ' + goalMonth(w.goalDate) : ''}` : 'без цели'}</span>${monthly ? `<span>≈ +${fmt0(monthly)}/мес</span>` : ''}</span>
+  </button>`;
+}
+
+const STACK_PEEK = 46, STACK_CARD = 148, STACK_MAX = 4;
+function depositsBlock(bal) {
+  const deps = S.wallets.filter(w => w.dep);
+  // wallets someone already keeps out of the plan are probably deposits — ask once
+  const cand = !S.plan.depAsked && S.wallets.find(w => !w.dep && S.plan.exclude.includes(w.id));
+  const offer = cand ? `<div class="dep-offer"><span>«${esc(cand.name)}» не учитывается в плане трат. Это депозит или накопления?</span>
+    <span class="dep-offer-btns"><button class="chip on" data-act="dep-yes" data-id="${cand.id}">Да, депозит</button><button class="chip" data-act="dep-no">Нет</button></span></div>` : '';
+  if (!deps.length) return offer ? `<div class="h2row"><h2>Накопления</h2></div>${offer}` : '';
+  const total = deps.reduce((a, w) => a + (bal[w.id] || 0), 0);
+  const monthly = deps.reduce((a, w) => a + (w.rate > 0 && bal[w.id] > 0 ? (bal[w.id] * w.rate) / 1200 : 0), 0);
+  const head = `<div class="h2row"><h2>Накопления</h2><span class="total">${fmt(total)}${monthly ? ` · ≈ +${fmt0(monthly)}/мес` : ''}</span></div>`;
+  const add = `<button class="dep-add" data-act="new-dep">${icon('plus')} Новый депозит</button>`;
+  if (deps.length === 1) return head + offer + `<div class="stack">${depCard(deps[0], bal[deps[0].id] || 0)}</div>` + add;
+  if (UI.stackOpen) return head + offer + `<div class="stack open">${deps.map(w => depCard(w, bal[w.id] || 0)).join('')}</div>
+    <div class="stack-btns">${add}<button class="dep-add" data-act="stack">Свернуть</button></div>`;
+  const vis = deps.slice(0, STACK_MAX), m = vis.length;
+  // the first deposit lies in front; the others peek out above it
+  const cards = vis.map((w, i) => depCard(w, bal[w.id] || 0, (m - 1 - i) * STACK_PEEK)).reverse().join('');
+  return head + offer + `<div class="stack shut" data-act="stack" style="height:${(m - 1) * STACK_PEEK + STACK_CARD}px">${cards}</div>
+    <div class="stack-hint">${deps.length > m ? `ещё ${deps.length - m} · ` : ''}нажми, чтобы раскрыть</div>`;
+}
+
+/* ---------- debts ---------- */
+function debtLeft(d) {
+  let open = 0, back = 0;
+  for (const t of S.tx) if (t.type === 'debt' && t.debt === d.id) (t.dk === 'back' ? (back += Math.abs(t.amount)) : (open += Math.abs(t.amount)));
+  return { open, back, left: Math.round((open - back) * 100) / 100 };
+}
+function debtStats() {
+  const out = { in: [], out: [], sumIn: 0, sumOut: 0 };
+  for (const d of S.debts) {
+    const l = debtLeft(d);
+    if (l.left <= 0) continue;
+    out[d.dir].push({ d, ...l });
+    if (d.dir === 'in') out.sumIn += l.left; else out.sumOut += l.left;
+  }
+  return out;
+}
+function debtsBlock() {
+  const st = debtStats();
+  if (!st.in.length && !st.out.length) return '';
+  const names = arr => arr.map(x => x.d.name).slice(0, 3).join(', ') + (arr.length > 3 ? '…' : '');
+  const sq = (dir, title, sum, arr) => `<button class="dsq ${dir}" data-act="debts" data-dir="${dir}">
+    <span class="dsq-t">${title}${icon('chevron-right')}</span>
+    <b>${arr.length ? fmt(sum) : '—'}</b><small>${arr.length ? esc(names(arr)) : 'никому'}</small></button>`;
+  return `<div class="h2row"><h2>Долги</h2></div><div class="dsqs">
+    ${sq('in', 'Тебе должны', st.sumIn, st.in)}${sq('out', 'Ты должен', st.sumOut, st.out)}</div>`;
 }
 
 // Daily spending for the last 14 days, oldest first (bill payments excluded, like the limit)
@@ -435,10 +509,8 @@ function yesterdayLimit(p) {
   const y = new Date(p.today.getFullYear(), p.today.getMonth(), p.today.getDate() - 1);
   if (y < p.start) return null;
   const ys = ymd(y), tdy = ymd(p.today);
-  const counted_ = id => !S.plan.exclude.includes(id) && !!find('wallet', id);
   let spentY = 0;
-  for (const t of S.tx) if (t.date === ys && !t.bill && ((t.type === 'expense' && counted_(t.from)) ||
-    (t.type === 'transfer' && counted_(t.from) && !counted_(t.to)))) spentY += t.amount;
+  for (const t of S.tx) if (t.date === ys && outflow(t)) spentY += t.amount;
   const freeY = countedBalance(balances(tdy)) - S.plan.reserve - p.billsLeft;
   return Math.max(0, (freeY + spentY) / (p.daysLeft + 1));
 }
@@ -465,11 +537,24 @@ function planCard() {
     <div class="spark">${days.map((v, i) => `<i class="${i === days.length - 1 ? 'now' : ''}" style="height:${Math.max(4, (v / top) * 100)}%;animation-delay:${i * 18}ms"></i>`).join('')}</div>
     <div class="plan-meta"><span>${p.daysLeft} ${plural(p.daysLeft, DAYS)} до зарплаты · ${shortDate(p.end)}</span><span>≈ ${fmt0(p.limit)} в день</span></div>
     ${note ? `<div class="plan-note">${note}</div>` : ''}
-    ${p.unpaid.length ? (() => {
-      const nx = p.unpaid[0], late = nx.due < p.today;
-      return `<div class="plan-bills ${late ? 'late' : ''}">${icon('lock')}<span>${fmt(p.billsLeft)} отложено на ${p.unpaid.length} ${plural(p.unpaid.length, ['платёж', 'платежа', 'платежей'])} · ${late ? 'просрочен' : 'ближайший'}: ${esc(nx.b.name)}, ${shortDate(nx.due)}</span></div>`;
-    })() : ''}
+    ${billSoonLine(p)}
   </section>`;
+}
+
+// The nearest unpaid bill, shown only in its last week (or when it's late) so it doesn't hang there all month
+const SOON_DAYS = 7;
+function billSoon(p) {
+  const all = p.unpaid.map(o => ({ b: o.b, due: o.due }));
+  for (const b of S.plan.bills) if (!p.bills.some(o => o.b.id === b.id)) all.push({ b, due: nextDue(b, p.end) });
+  const lim = new Date(p.today.getFullYear(), p.today.getMonth(), p.today.getDate() + SOON_DAYS);
+  return all.filter(o => o.due && o.due <= lim).sort((a, b) => a.due - b.due)[0] || null;
+}
+function billSoonLine(p) {
+  const o = billSoon(p);
+  if (!o) return '';
+  const d = dayDiff(p.today, o.due);
+  const when = d < 0 ? 'Просрочен платёж' : d === 0 ? 'Сегодня платёж' : d === 1 ? 'Завтра платёж' : `Через ${d} ${plural(d, DAYS)} платёж`;
+  return `<div class="plan-bill ${d < 0 ? 'late' : ''}">${icon('repeat')}<span>${when} <b>${esc(o.b.name)}</b></span><b>${fmt(o.b.amount)}</b></div>`;
 }
 
 // The limit rolls to its new value instead of jumping
@@ -643,8 +728,9 @@ function billsBlock(info) {
       ${o && !o.paid ? `<button class="pay-btn" data-pay="${b.id}">Оплатить</button>` : o?.paid ? `<span class="paid-ic">${icon('check')}</span>` : ''}
     </div>`;
   }).join('');
-  return `<div class="label">Обязательные платежи</div>
-    ${rows ? `<div class="list bills">${rows}</div>` : '<div class="set-note" style="padding:0 0 8px">Аренда, коммуналка, интернет, кредиты, подписки. Деньги на них откладываются заранее, и дневной лимит их не трогает.</div>'}
+  const monthly = bills.reduce((a, b) => a + b.amount, 0);
+  return `<div class="label lrow"><span>Обязательные платежи и подписки</span>${monthly ? `<small>${fmt(monthly)} в месяц</small>` : ''}</div>
+    ${rows ? `<div class="list bills">${rows}</div>` : '<div class="set-note" style="padding:0 0 8px">Аренда, коммуналка, интернет, кредиты, подписки. Деньги на них откладываются заранее, и дневной лимит их не трогает. За неделю до списания на главной появится напоминание.</div>'}
     <button class="btn add-bill" id="bill-add">${icon('plus')} Добавить платёж</button>`;
 }
 
@@ -699,33 +785,66 @@ function openBill(id) {
 function openPlan() {
   const p = S.plan;
   const info = planInfo();
-  const row = (k, v) => `<div class="field"><span>${k}</span><b class="fv">${v}</b></div>`;
+  let top = '';
+  if (info) {
+    const over = info.leftToday < 0;
+    const state = over || info.free <= 0 ? 'over' : info.limit > 0 && info.leftToday < info.limit * .2 ? 'warn' : '';
+    // where the money in the wallets goes: free to spend, set aside for bills, kept as the reserve
+    const parts = [
+      ['free', 'Свободно', Math.max(0, info.free)],
+      ['bills', 'Платежи', info.billsLeft],
+      ['res', 'Запас', p.reserve],
+    ].filter(x => x[2] > 0);
+    const sum = parts.reduce((a, x) => a + x[2], 0) || 1;
+    const kpi = (k, v, cls = '') => `<div class="pk ${cls}"><span>${k}</span><b>${v}</b></div>`;
+    top = `
+      <div class="sec plan ${state} plan-sum">
+        <div class="plan-label">Свободно до ${shortDate(info.end)}</div>
+        <div class="plan-big">${fmt0(info.free)}</div>
+        <div class="split">${parts.map(([c, , v]) => `<i class="${c}" style="flex:${v / sum}"></i>`).join('')}</div>
+        <div class="split-legend">
+          <span><i class="w"></i>В кошельках ${fmt0(info.balance)}</span>
+          ${parts.map(([c, n, v]) => `<span><i class="${c}"></i>${n} ${fmt0(v)}</span>`).join('')}
+        </div>
+      </div>
+      <div class="pks">
+        ${kpi('Лимит на сегодня', fmt0(info.limit))}
+        ${kpi('Потрачено сегодня', fmt0(info.spentToday), over ? 'neg' : '')}
+        ${kpi('За период', fmt0(info.spentPeriod))}
+        ${kpi('До зарплаты', `${info.daysLeft} ${plural(info.daysLeft, DAYS)}`)}
+      </div>
+      ${info.tomorrow !== null ? `<div class="pk-wide">Если сегодня больше не тратить, завтра лимит будет <b>${fmt0(info.tomorrow)}</b></div>` : ''}
+      <details class="how"><summary>Как считается лимит</summary>
+        <p>Каждое утро: (деньги в кошельках − неоплаченные платежи − запас) ÷ дни до зарплаты. Потратил меньше — завтра лимит вырастет, больше — уменьшится. Депозиты и долги не считаются тратами.</p></details>
+      <button class="btn add-bill" id="p-summary">${icon('chart-line')} Итоги прошлого периода</button>`;
+  }
+  const paydays = new Set(p.paydays);
   const sh = openSheet(`
     ${sheetHead('План трат')}
-    ${info ? `
-      ${row('Период', `${shortDate(info.start)} – ${shortDate(new Date(info.end - 864e5))}`)}
-      ${row('Денег в кошельках', fmt(info.balance))}
-      ${row('Ещё оплатить', fmt(info.billsLeft))}
-      ${row('Оставить в конце', fmt(p.reserve))}
-      ${row('Свободно', `<span style="color:${info.free < 0 ? 'var(--neg)' : 'inherit'}">${fmt(info.free)}</span>`)}
-      ${row('Потрачено за период', fmt(info.spentPeriod))}
-      ${row('Осталось дней (с сегодня)', info.daysLeft)}
-      ${row('Лимит на сегодня', fmt0(info.limit))}
-      ${row('Потрачено сегодня', fmt(info.spentToday))}
-      ${info.tomorrow !== null ? row('Лимит на завтра (если больше не тратить)', fmt0(info.tomorrow)) : ''}
-      <p class="set-note" style="padding:10px 0 0">Каждое утро лимит пересчитывается: (деньги − неоплаченные платежи − запас) ÷ дни до зарплаты. Потратил меньше — завтра лимит вырастет, больше — уменьшится.</p>
-      <button class="btn add-bill" id="p-summary">${icon('chart-line')} Итоги прошлого периода</button>` : ''}
+    ${top}
     ${billsBlock(info)}
     <div class="label">Настройки</div>
-    <div class="field"><span>Показывать на главной</span><input type="checkbox" id="p-on" class="switch" ${p.on ? 'checked' : ''}></div>
-    <div class="field"><span>Дни зарплаты</span><input id="p-days" inputmode="text" placeholder="1, 16" value="${p.paydays.join(', ')}" autocomplete="off" enterkeyhint="done"></div>
-    <div class="field"><span>Оставлять в конце периода</span><input id="p-res" inputmode="decimal" placeholder="0" value="${p.reserve || ''}" enterkeyhint="done"></div>
-    <div class="field col"><span>Какие кошельки учитывать</span>
-      <div class="chips" id="p-w">${S.wallets.map(w => `<button type="button" class="chip ${p.exclude.includes(w.id) ? '' : 'on'}" data-w="${w.id}">${esc(w.name)}</button>`).join('')}</div>
-      <span class="hint">Отключите накопительные счета и депозиты, с которых не тратите. Перевод на них считается тратой.</span>
+    <div class="set-card">
+      <div class="field"><span>Показывать на главной</span><input type="checkbox" id="p-on" class="switch" ${p.on ? 'checked' : ''}></div>
+      <div class="field col"><span>Дни зарплаты</span>
+        <div class="daygrid" id="p-days">${Array.from({ length: 31 }, (_, i) => `<button type="button" data-d="${i + 1}" class="${paydays.has(i + 1) ? 'on' : ''}">${i + 1}</button>`).join('')}</div>
+        <span class="hint">Отметьте один или несколько дней. 31 — последний день любого месяца.</span>
+      </div>
+      <div class="field"><span>Оставлять в конце периода</span><input id="p-res" inputmode="decimal" placeholder="0 ₸" value="${p.reserve || ''}" enterkeyhint="done"></div>
+      <div class="field col"><span>Какие кошельки учитывать</span>
+        <div class="chips" id="p-w">${S.wallets.filter(w => !w.dep).map(w => `<button type="button" class="chip ${p.exclude.includes(w.id) ? '' : 'on'}" data-w="${w.id}">${esc(w.name)}</button>`).join('')}</div>
+        <span class="hint">${S.wallets.some(w => w.dep) ? 'Депозиты не учитываются сами. ' : ''}Отключите счета, с которых не тратите.</span>
+      </div>
     </div>
     <div class="actions"><button class="btn primary" id="p-save">Сохранить</button></div>`);
 
+  $('#p-days', sh).onclick = e => {
+    const b = e.target.closest('[data-d]');
+    if (!b) return;
+    const d = +b.dataset.d;
+    paydays.has(d) ? paydays.delete(d) : paydays.add(d);
+    b.classList.toggle('on');
+  };
   $('#bill-add', sh).onclick = () => openBill();
   $('#p-summary', sh)?.addEventListener('click', () => openSummary(prevPayPeriod(payPeriod())));
   sh.addEventListener('click', e => {
@@ -744,8 +863,8 @@ function openPlan() {
   };
   sh.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.tagName === 'INPUT') e.target.blur(); });
   $('#p-save', sh).onclick = () => {
-    const days = ($('#p-days', sh).value.match(/\d+/g) || []).map(Number).filter(d => d >= 1 && d <= 31);
-    if (!days.length) return toast('Укажите хотя бы один день зарплаты, например 1, 16');
+    const days = [...paydays];
+    if (!days.length) return toast('Отметьте хотя бы один день зарплаты');
     S.plan = {
       ...S.plan,
       on: $('#p-on', sh).checked,
@@ -756,6 +875,152 @@ function openPlan() {
     save();
     closeSheet();
     render();
+  };
+}
+
+/* ---------- debts: sheets ---------- */
+// the big amount field grows with its text so the ₸ sits right after the number
+function fitAmount(el) {
+  if (!el) return;
+  const fit = () => (el.style.width = Math.max(1, (el.value || el.placeholder).length) + 0.6 + 'ch');
+  el.addEventListener('input', fit);
+  fit();
+}
+const avatarColor = name => COLORS[[...name].reduce((a, c) => a + c.charCodeAt(0), 0) % COLORS.length];
+const spendWallets = () => S.wallets.filter(w => !w.dep);
+
+function openDebts(dir = 'in', openId = null) {
+  const st = debtStats();
+  const rows = st[dir].sort((a, b) => (a.d.date < b.d.date ? 1 : -1));
+  const closed = S.debts.filter(d => d.dir === dir && debtLeft(d).left <= 0).slice(-5).reverse();
+  const row = x => {
+    const { d } = x, w = findOr('wallet', d.wallet), on = openId === d.id;
+    const part = x.back > 0 ? ` · вернул ${fmt(x.back)} из ${fmt(x.open)}` : '';
+    return `<div class="drow ${on ? 'on' : ''}" data-debt="${d.id}">
+      <span class="ava" style="${cv(avatarColor(d.name))}">${esc(d.name.slice(0, 1).toUpperCase())}</span>
+      <span class="tx-main"><div class="tx-title">${esc(d.name)}</div><div class="tx-sub">${shortDate(dateOf(d.date))} · ${esc(w.name)}${part}${d.note ? ' · ' + esc(d.note) : ''}</div></span>
+      <b class="tx-amt ${dir === 'in' ? 'pos' : 'neg'}">${fmt(x.left)}</b>
+      ${on ? `<div class="dacts">
+        <button class="btn primary" data-back-all="${d.id}">${dir === 'in' ? 'Вернул всё' : 'Отдал всё'}</button>
+        <button class="btn" data-back-part="${d.id}">Часть</button>
+        <button class="btn" data-debt-edit="${d.id}" aria-label="Изменить">${icon('pencil')}</button>
+        <span class="hint">Деньги ${dir === 'in' ? 'вернутся' : 'спишутся'}: «${esc(w.name)}». Для другого кошелька — «Часть».</span>
+      </div>` : ''}
+    </div>`;
+  };
+  const sh = openSheet(`
+    ${sheetHead('Долги')}
+    <div class="seg dseg">
+      <button data-dseg="in" class="${dir === 'in' ? 'on' : ''}">Мне должны${st.sumIn ? ' · ' + compact(st.sumIn) : ''}</button>
+      <button data-dseg="out" class="${dir === 'out' ? 'on' : ''}">Я должен${st.sumOut ? ' · ' + compact(st.sumOut) : ''}</button>
+    </div>
+    ${rows.length ? `<div class="list dlist">${rows.map(row).join('')}</div>` : `<div class="empty">${dir === 'in' ? 'Тебе никто не должен.' : 'Ты никому не должен.'}</div>`}
+    ${closed.length ? `<div class="label">Закрытые</div><div class="list dlist closed">${closed.map(d => `<div class="drow" data-debt-edit="${d.id}">
+      <span class="ava done">${icon('check')}</span>
+      <span class="tx-main"><div class="tx-title">${esc(d.name)}</div><div class="tx-sub">${shortDate(dateOf(d.date))}</div></span>
+      <b class="tx-amt"><s>${fmt(debtLeft(d).open)}</s></b></div>`).join('')}</div>` : ''}
+    <div class="actions">
+      <button class="btn" data-debt-new="in">${icon('arrow-right')} Дал в долг</button>
+      <button class="btn" data-debt-new="out">${icon('arrow-down')} Взял в долг</button>
+    </div>
+    <p class="set-note" style="padding:10px 0 0">Долг — не трата и не доход: деньги просто временно у другого человека. В статистику расходов он не попадает.</p>`);
+  sh.addEventListener('click', e => {
+    const k = e.target.closest('[data-dseg],[data-back-all],[data-back-part],[data-debt-edit],[data-debt-new],[data-debt]');
+    if (!k) return;
+    const ds = k.dataset;
+    if (ds.dseg) return openDebts(ds.dseg);
+    if (ds.backAll) return debtBack(ds.backAll, debtLeft(S.debts.find(d => d.id === ds.backAll)).left);
+    if (ds.backPart) return openDebtBack(ds.backPart);
+    if (ds.debtEdit) return openDebtForm(null, ds.debtEdit);
+    if (ds.debtNew) return openDebtForm(ds.debtNew);
+    if (ds.debt) return openDebts(dir, openId === ds.debt ? null : ds.debt);
+  });
+}
+
+function debtBack(id, amount, wallet, date) {
+  const d = S.debts.find(x => x.id === id);
+  if (!d || !(amount > 0)) return;
+  const undo = snapshot();
+  const w = find('wallet', wallet) ? wallet : find('wallet', d.wallet) ? d.wallet : spendWallets()[0]?.id;
+  if (!w) return toast('Сначала добавьте кошелёк');
+  S.tx.push({ id: uid(), type: 'debt', debt: id, dk: 'back', from: w, to: w, amount: d.dir === 'in' ? amount : -amount,
+    date: date || today(), sub: '', note: '', ts: Date.now() });
+  save();
+  render();
+  openDebts(d.dir);
+  toast(debtLeft(d).left <= 0 ? `Долг «${d.name}» закрыт` : `Записано: ${fmt(amount)}`, undo, true);
+}
+
+function openDebtBack(id) {
+  const d = S.debts.find(x => x.id === id);
+  if (!d) return;
+  const left = debtLeft(d).left;
+  const sh = openSheet(`
+    ${sheetHead(d.dir === 'in' ? `${d.name} возвращает` : `Отдаю: ${d.name}`)}
+    <div class="amount"><input id="db-amount" inputmode="decimal" value="${left}" autocomplete="off"><span>₸</span></div>
+    <div class="bal-note">Осталось вернуть ${fmt(left)}</div>
+    <div class="field"><span>${d.dir === 'in' ? 'На кошелёк' : 'С кошелька'}</span><select id="db-w">${spendWallets().map(w => `<option value="${w.id}" ${w.id === d.wallet ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select></div>
+    <div class="field"><span>Дата</span><input id="db-date" type="date" value="${today()}"></div>
+    <div class="actions"><button class="btn" id="db-back">Назад</button><button class="btn primary" id="db-save">Записать</button></div>`);
+  fitAmount($('#db-amount', sh));
+  $('#db-back', sh).onclick = () => openDebts(d.dir, id);
+  $('#db-save', sh).onclick = () => {
+    const a = Math.round(parseAmount($('#db-amount', sh).value) * 100) / 100;
+    if (!(a > 0)) return shake($('.amount', sh));
+    debtBack(id, Math.min(a, left), $('#db-w', sh).value, $('#db-date', sh).value);
+  };
+}
+
+function openDebtForm(dir, id) {
+  const ex = id ? S.debts.find(x => x.id === id) : null;
+  if (ex) dir = ex.dir;
+  const ws = spendWallets();
+  if (!ws.length) return toast('Сначала добавьте кошелёк');
+  const known = [...new Set(S.debts.map(d => d.name))];
+  const sh = openSheet(`
+    ${sheetHead(ex ? 'Долг' : dir === 'in' ? 'Дал в долг' : 'Взял в долг')}
+    ${ex ? '' : `<div class="amount"><input id="df-amount" inputmode="decimal" placeholder="0" autocomplete="off"><span>₸</span></div>`}
+    <div class="field"><span>${dir === 'in' ? 'Кому' : 'У кого'}</span><input id="df-name" maxlength="30" list="df-names" placeholder="Имя" value="${esc(ex?.name || '')}" autocomplete="off" enterkeyhint="done"></div>
+    <datalist id="df-names">${known.map(n => `<option value="${esc(n)}">`).join('')}</datalist>
+    ${ex ? '' : `<div class="field"><span>${dir === 'in' ? 'С кошелька' : 'На кошелёк'}</span><select id="df-w">${ws.map(w => `<option value="${w.id}">${esc(w.name)}</option>`).join('')}</select></div>
+    <div class="field"><span>Дата</span><input id="df-date" type="date" value="${today()}"></div>`}
+    <div class="field"><span>Заметка</span><input id="df-note" maxlength="60" placeholder="Необязательно" value="${esc(ex?.note || '')}" autocomplete="off" enterkeyhint="done"></div>
+    <div class="actions">
+      ${ex ? `<button class="btn danger" id="df-del" aria-label="Удалить">${icon('trash-2')}</button>` : ''}
+      <button class="btn" id="df-back">Назад</button>
+      <button class="btn primary" id="df-save">Сохранить</button>
+    </div>`);
+  sh.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.tagName === 'INPUT') e.target.blur(); });
+  fitAmount($('#df-amount', sh));
+  if (!ex) setTimeout(() => $('#df-amount', sh)?.focus(), 300);
+  $('#df-back', sh).onclick = () => openDebts(dir);
+  $('#df-save', sh).onclick = () => {
+    const name = $('#df-name', sh).value.trim();
+    if (!name) return shake($('#df-name', sh).closest('.field'));
+    const undo = snapshot();
+    if (ex) Object.assign(ex, { name, note: $('#df-note', sh).value.trim() });
+    else {
+      const a = Math.round(parseAmount($('#df-amount', sh).value) * 100) / 100;
+      if (!(a > 0)) return shake($('.amount', sh));
+      const d = { id: uid(), name, dir, wallet: $('#df-w', sh).value, date: $('#df-date', sh).value || today(), note: $('#df-note', sh).value.trim() };
+      S.debts.push(d);
+      S.tx.push({ id: uid(), type: 'debt', debt: d.id, dk: 'open', from: d.wallet, to: d.wallet, amount: dir === 'in' ? -a : a,
+        date: d.date, sub: '', note: d.note, ts: Date.now() });
+    }
+    save();
+    render();
+    openDebts(dir);
+    toast(ex ? 'Изменено' : 'Долг записан', undo, !ex);
+  };
+  if (ex) $('#df-del', sh).onclick = () => {
+    if (!confirm(`Удалить долг «${ex.name}» вместе с его записями?`)) return;
+    const undo = snapshot();
+    S.debts = S.debts.filter(d => d.id !== ex.id);
+    S.tx = S.tx.filter(t => t.debt !== ex.id);
+    save();
+    render();
+    openDebts(dir);
+    toast('Долг удалён', undo);
   };
 }
 
@@ -793,7 +1058,7 @@ function openSummary(pp) {
   const prev = first && ymd(pPrev.start) >= first ? periodStats(pPrev) : { spent: 0, byCat: {} };
   const left = countedBalance(balances(ymd(pp.end)));
   const cats = Object.entries(st.byCat).sort((a, b) => b[1] - a[1]).slice(0, 4);
-  const savings = S.wallets.find(w => S.plan.exclude.includes(w.id));
+  const savings = S.wallets.find(w => w.dep) || S.wallets.find(w => S.plan.exclude.includes(w.id));
   const from = S.wallets.find(w => counted(w.id));
   const range = `${shortDate(pp.start)} – ${shortDate(new Date(pp.end - 864e5))}`;
   const row = (k, v) => `<div class="field"><span>${k}</span><b class="fv">${v}</b></div>`;
@@ -1076,6 +1341,7 @@ function shake(el) {
 function openTx(o) {
   const ex = o.id ? S.tx.find(t => t.id === o.id) : null;
   if (ex?.type === 'adjust') return openAdjust(ex.id);
+  if (ex?.type === 'debt') return openDebts(S.debts.find(d => d.id === ex.debt)?.dir || 'in', ex.debt);
   const t = ex ? { ...ex } : { type: o.type, from: o.from, to: o.to, amount: o.amount || '', date: today(), sub: o.sub || '', note: o.note || '', bill: o.bill };
   const bills = S.plan.bills;
   const billSel = t.type === 'expense' && (bills.length || t.bill);
@@ -1281,15 +1547,16 @@ function openAdjust(id) {
 }
 
 /* ---------- item (income / wallet / category) sheet ---------- */
-function openItem(kind, id) {
+function openItem(kind, id, pre = {}) {
   const ex = id ? find(kind, id) : null;
   const n = list(kind).length;
   const it = ex ? { ...ex } : {
     name: '',
-    icon: { income: 'briefcase', wallet: 'credit-card', category: 'shopping-bag' }[kind],
-    color: COLORS[(n * 5 + 3) % COLORS.length],
+    icon: pre.dep ? 'piggy-bank' : { income: 'briefcase', wallet: 'credit-card', category: 'shopping-bag' }[kind],
+    color: pre.dep ? '#8b5cf6' : COLORS[(n * 5 + 3) % COLORS.length],
     initial: 0,
     budget: 0,
+    dep: !!pre.dep,
   };
 
   let extraInfo = '';
@@ -1303,14 +1570,25 @@ function openItem(kind, id) {
       extraInfo = `${periodLabel()}: ${fmt((kind === 'income' ? s.inc : s.exp)[id] || 0)}`;
     }
   }
-  const titles = ex ? { income: 'Источник дохода', wallet: 'Кошелёк', category: 'Категория' } : { income: 'Новый доход', wallet: 'Новый кошелёк', category: 'Новая категория' };
+  const titles = ex ? { income: 'Источник дохода', wallet: it.dep ? 'Депозит' : 'Кошелёк', category: 'Категория' }
+    : { income: 'Новый доход', wallet: 'Новый счёт', category: 'Новая категория' };
+  const num = v => (v ? String(v).replace('.', ',') : '');
 
   const sh = openSheet(`
     ${sheetHead(titles[kind])}
+    ${kind === 'wallet' ? `<div class="seg kind-seg" id="i-kind"><button type="button" data-k="0">Кошелёк</button><button type="button" data-k="1">Депозит</button></div>` : ''}
     <div class="preview" id="pv"></div>
     ${ex && kind === 'wallet' ? `<button class="btn recon-btn" id="i-recon">${icon('landmark')} Сверить с банком${ex.checked ? `<small>последняя: ${dayLabel(ex.checked).toLowerCase()}</small>` : ''}</button>` : ''}
-    <div class="field"><span>Название</span><input id="i-name" maxlength="30" placeholder="${{ income: 'Зарплата', wallet: 'Kaspi Gold', category: 'Продукты' }[kind]}" value="${esc(it.name)}" autocomplete="off" enterkeyhint="done"></div>
-    ${kind === 'wallet' ? `<div class="field"><span>Начальный баланс</span><input id="i-initial" inputmode="decimal" placeholder="0" value="${it.initial || ''}" enterkeyhint="done"></div>` : ''}
+    ${ex && it.dep ? `<button class="btn recon-btn" id="i-interest">${icon('percent')} Начислить проценты</button>` : ''}
+    <div class="field"><span>Название</span><input id="i-name" maxlength="30" placeholder="${{ income: 'Зарплата', wallet: it.dep ? 'Halyk депозит' : 'Kaspi Gold', category: 'Продукты' }[kind]}" value="${esc(it.name)}" autocomplete="off" enterkeyhint="done"></div>
+    ${kind === 'wallet' ? `<div class="field"><span>${ex ? 'Начальный баланс' : 'Сейчас на счёте'}</span><input id="i-initial" inputmode="decimal" placeholder="0" value="${it.initial || ''}" enterkeyhint="done"></div>
+    <div class="dep-fields" id="i-dep">
+      <div class="field"><span>Ставка, % годовых</span><input id="i-rate" inputmode="decimal" placeholder="Нет" value="${num(it.rate)}" enterkeyhint="done"></div>
+      <div class="field"><span>Цель</span><input id="i-goal" maxlength="24" placeholder="Подушка, отпуск…" value="${esc(it.goal || '')}" autocomplete="off" enterkeyhint="done"></div>
+      <div class="field"><span>Сумма цели</span><input id="i-goal-amt" inputmode="decimal" placeholder="Нет" value="${it.goalAmount || ''}" enterkeyhint="done"></div>
+      <div class="field"><span>Срок цели</span><input id="i-goal-date" type="month" value="${it.goalDate || ''}"></div>
+      <p class="set-note" style="padding:8px 0 0">Депозит не входит в «Можно потратить сегодня». Перевод с карты на депозит — не трата.</p>
+    </div>` : ''}
     ${kind === 'category' ? `<div class="field"><span>Бюджет на месяц</span><input id="i-budget" inputmode="decimal" placeholder="Нет" value="${it.budget || ''}" enterkeyhint="done"></div>` : ''}
     <div class="label">Цвет</div>
     <div class="swatches" id="i-colors">${COLORS.map(c => `<button type="button" class="sw" data-color="${c}" style="${cv(c)}" aria-label="${c}"></button>`).join('')}</div>
@@ -1324,6 +1602,19 @@ function openItem(kind, id) {
     </div>`);
 
   const fName = $('#i-name', sh);
+  const kindSeg = $('#i-kind', sh);
+  const paintKind = () => {
+    if (!kindSeg) return;
+    $$('button', kindSeg).forEach(b => b.classList.toggle('on', !!+b.dataset.k === it.dep));
+    $('#i-dep', sh).hidden = !it.dep;
+  };
+  paintKind();
+  kindSeg?.addEventListener('click', e => { const b = e.target.closest('[data-k]'); if (b) { it.dep = !!+b.dataset.k; paintKind(); } });
+  $('#i-interest', sh)?.addEventListener('click', () => {
+    let src = S.incomes.find(i => /процент/i.test(i.name));
+    if (!src) { src = { id: uid(), name: 'Проценты', icon: 'percent', color: '#14b8a6' }; S.incomes.push(src); save(); }
+    openTx({ type: 'income', from: src.id, to: id });
+  });
   const paint = () => {
     $('#pv', sh).innerHTML = `<span class="coin" style="${cv(it.color)}">${icon(it.icon)}</span>
       <span class="pname">${esc(fName.value.trim() || 'Название')}</span>${extraInfo ? `<span class="pbal">${esc(extraInfo)}</span>` : ''}`;
@@ -1357,7 +1648,17 @@ function openItem(kind, id) {
     const name = fName.value.trim();
     if (!name) { fName.focus(); shake(fName.closest('.field')); return; }
     const rec = { id: ex ? ex.id : uid(), name, icon: it.icon, color: it.color };
-    if (kind === 'wallet') rec.initial = parseAmount($('#i-initial', sh).value) || 0;
+    if (kind === 'wallet') {
+      rec.initial = parseAmount($('#i-initial', sh).value) || 0;
+      rec.dep = it.dep;
+      if (it.dep) {
+        rec.rate = Math.max(0, parseAmount($('#i-rate', sh).value) || 0);
+        rec.goal = $('#i-goal', sh).value.trim();
+        rec.goalAmount = Math.max(0, parseAmount($('#i-goal-amt', sh).value) || 0);
+        rec.goalDate = $('#i-goal-date', sh).value || '';
+        S.plan.exclude = S.plan.exclude.filter(x => x !== rec.id); // a deposit is out of the plan by itself
+      }
+    }
     if (kind === 'category') rec.budget = Math.max(0, parseAmount($('#i-budget', sh).value) || 0);
     const arr = list(kind);
     if (ex) arr[arr.findIndex(x => x.id === ex.id)] = { ...ex, ...rec };
@@ -1396,6 +1697,12 @@ function txRow(t) {
     main = a; title = a.name;
     sub = ['→ ' + b.name, t.note].filter(Boolean).join(' · ');
     amt = '+' + fmt(t.amount); cls = 'pos';
+  } else if (t.type === 'debt') {
+    const d = S.debts.find(x => x.id === t.debt), who = d ? d.name : 'Долг', lent = d?.dir !== 'out';
+    main = { icon: 'hand-coins', color: '#14b8a6' };
+    title = t.dk === 'back' ? (lent ? `${who} вернул долг` : `Вернул долг: ${who}`) : (lent ? `Дал в долг: ${who}` : `Взял в долг: ${who}`);
+    sub = [b.name, t.note].filter(Boolean).join(' · ');
+    amt = signed(t.amount); cls = t.amount > 0 ? 'pos' : 'mid';
   } else if (t.type === 'adjust') {
     main = { icon: 'landmark', color: '#78716c' }; title = 'Сверка с банком';
     sub = b.name;
@@ -1437,7 +1744,7 @@ function renderHistory() {
 function renderHistoryList() {
   const q = UI.q.trim().toLowerCase();
   const names = t => { const [fk, tk] = TX_KINDS[t.type]; return `${findOr(fk, t.from).name} ${findOr(tk, t.to).name} ${t.sub} ${t.note} ${t.amount}`.toLowerCase(); };
-  const ok = t => UI.hf === 'all' || t.type === UI.hf || (UI.hf === 'transfer' && t.type === 'adjust');
+  const ok = t => UI.hf === 'all' || t.type === UI.hf || (UI.hf === 'transfer' && (t.type === 'adjust' || t.type === 'debt'));
   const txs = sortTx(periodTx().filter(t => ok(t) && (!q || names(t).includes(q))));
   const box = $('#h-list');
   if (!txs.length) {
@@ -1722,7 +2029,7 @@ function renderSettings() {
     <div class="set-list">
       <button class="set-row danger" data-act="reset">${icon('trash-2')}Стереть все данные</button>
     </div>
-    <div class="set-note">Деньги · v2.0 · работает без интернета</div>`;
+    <div class="set-note">Деньги · v2.1 · работает без интернета</div>`;
 }
 
 async function exportData() {
@@ -1951,6 +2258,26 @@ const ACTIONS = {
   import: () => $('#import-file').click(),
   'import-csv': () => $('#import-csv').click(),
   theme: el => { pref.set('theme', el.dataset.theme); applyTheme(); render(); },
+  stack: (el, e) => {
+    // in tap-to-pick mode a tap on a card finishes the transfer instead of fanning the stack out
+    const t = e?.target.closest('.tile[data-id]');
+    if (UI.sel && t) return tapTile(t);
+    UI.stackOpen = !UI.stackOpen;
+    render();
+  },
+  'new-dep': () => { clearSel(); openItem('wallet', null, { dep: true }); },
+  'dep-yes': el => {
+    const w = find('wallet', el.dataset.id);
+    if (!w) return;
+    const undo = snapshot();
+    w.dep = true;
+    S.plan.exclude = S.plan.exclude.filter(x => x !== w.id);
+    save();
+    render();
+    toast(`«${w.name}» теперь депозит — задайте ставку и цель`, undo);
+  },
+  'dep-no': () => { S.plan.depAsked = true; save(); render(); },
+  debts: el => { clearSel(); openDebts(el.dataset.dir); },
   reset: () => {
     if (!confirm('Стереть ВСЕ данные?\n\nСовет: сначала сохраните копию.')) return;
     const undo = snapshot();
