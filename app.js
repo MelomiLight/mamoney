@@ -113,6 +113,8 @@ function normalize(d) {
   d.quick = d.quick || [];
   d.debts = d.debts || [];
   d.aliases = d.aliases || {}; // Apple Pay merchant as the bank sends it → the name you gave it
+  d.banks = d.banks || [];
+  d.loans = d.loans || [];
   if ((d.v || 1) < 2) {
     // v2: the app went Russian — rename the untouched English defaults
     const RU = { Salary: 'Зарплата', Other: 'Другое', Cash: 'Наличные', Groceries: 'Продукты', Cafe: 'Кафе',
@@ -260,7 +262,7 @@ const isDep = id => !!find('wallet', id)?.dep;
 const counted = id => !S.plan.exclude.includes(id) && !!find('wallet', id) && !isDep(id);
 // Money that leaves the plan: expenses, and transfers to wallets kept out of it. Saving into a deposit
 // isn't spending — it just leaves less for the days ahead.
-const outflow = t => !t.bill && ((t.type === 'expense' && counted(t.from)) ||
+const outflow = t => !t.bill && !t.loan && ((t.type === 'expense' && counted(t.from)) ||
   (t.type === 'transfer' && counted(t.from) && !counted(t.to) && !isDep(t.to)));
 const countedBalance = bal => S.wallets.filter(w => counted(w.id)).reduce((a, w) => a + (bal[w.id] || 0), 0);
 
@@ -297,7 +299,7 @@ const dueIn = (b, y, m) => new Date(y, m, Math.min(b.day, new Date(y, m + 1, 0).
 function billsInPeriod(pp) {
   const s = ymd(pp.start), e = ymd(pp.end);
   const out = [];
-  for (const b of S.plan.bills) {
+  for (const b of allBills()) {
     for (let k = 0; k <= 1; k++) {
       const due = dueIn(b, pp.start.getFullYear(), pp.start.getMonth() + k);
       if (due >= pp.start && due < pp.end) { out.push({ b, due }); break; }
@@ -435,7 +437,8 @@ function renderHome() {
       ${addTile('category')}
     </div>
     ${depositsBlock(bal)}
-    ${debtsBlock()}</div>`;
+    ${debtsBlock()}
+    ${loansBlock()}</div>`;
   UI.bump = null;
   countUp();
   if (UI.sel) applySel();
@@ -590,7 +593,7 @@ function planCard() {
 const SOON_DAYS = 7;
 function billSoon(p) {
   const all = p.unpaid.map(o => ({ b: o.b, due: o.due }));
-  for (const b of S.plan.bills) if (!p.bills.some(o => o.b.id === b.id)) all.push({ b, due: nextDue(b, p.end) });
+  for (const b of allBills()) if (!p.bills.some(o => o.b.id === b.id)) all.push({ b, due: nextDue(b, p.end) });
   const lim = new Date(p.today.getFullYear(), p.today.getMonth(), p.today.getDate() + SOON_DAYS);
   return all.filter(o => o.due && o.due <= lim).sort((a, b) => a.due - b.due)[0] || null;
 }
@@ -598,8 +601,11 @@ function billSoonLine(p) {
   const o = billSoon(p);
   if (!o) return '';
   const d = dayDiff(p.today, o.due);
-  const when = d < 0 ? 'Просрочен платёж' : d === 0 ? 'Сегодня платёж' : d === 1 ? 'Завтра платёж' : `Через ${d} ${plural(d, DAYS)} платёж`;
-  return `<div class="plan-bill ${d < 0 ? 'late' : ''}">${icon('repeat')}<span>${when} <b>${esc(o.b.name)}</b></span><b>${fmt(o.b.amount)}</b></div>`;
+  const when = o.b.bank
+    ? (d < 0 ? 'Просрочены рассрочки' : d === 0 ? 'Сегодня рассрочки' : d === 1 ? 'Завтра рассрочки' : `Через ${d} ${plural(d, DAYS)} рассрочки`)
+    : (d < 0 ? 'Просрочен платёж' : d === 0 ? 'Сегодня платёж' : d === 1 ? 'Завтра платёж' : `Через ${d} ${plural(d, DAYS)} платёж`);
+  const bank = o.b.bank && !p.unpaid.every(x => x.b.id !== o.b.id); // a bank payment due in this period can be marked right here
+  return `<div class="plan-bill ${d < 0 ? 'late' : ''}">${icon(o.b.bank ? 'credit-card' : 'repeat')}<span>${when} <b>${esc(o.b.bank ? findBank(o.b.bank)?.name || '' : o.b.name)}</b></span><b>${fmt(o.b.amount)}</b>${bank ? `<button class="pay-btn" data-act="pay-bank" data-id="${o.b.bank}">Оплачено</button>` : ''}</div>`;
 }
 
 // The limit rolls to its new value instead of jumping
@@ -764,7 +770,7 @@ function billStatus(o, pp) {
 }
 
 function billsBlock(info) {
-  const bills = S.plan.bills;
+  const bills = allBills();
   const inPer = new Map((info?.bills || []).map(o => [o.b.id, o]));
   const rows = [...bills].sort((a, b) => a.day - b.day).map(b => {
     const cat = findOr('category', b.cat);
@@ -786,6 +792,7 @@ function billsBlock(info) {
 }
 
 function payBill(id) {
+  if (id.startsWith('bank:')) return payBank(id.slice(5), openPlan);
   const b = S.plan.bills.find(x => x.id === id);
   if (!b) return;
   const w = S.wallets.find(x => counted(x.id)) || S.wallets[0];
@@ -938,7 +945,7 @@ function openPlan() {
     const pay = e.target.closest('[data-pay]');
     if (pay) return payBill(pay.dataset.pay);
     const row = e.target.closest('[data-bill]');
-    if (row) openBill(row.dataset.bill);
+    if (row) row.dataset.bill.startsWith('bank:') ? openLoans() : openBill(row.dataset.bill);
   });
 
   const ex = new Set(p.exclude);
@@ -963,6 +970,447 @@ function openPlan() {
     closeSheet();
     render();
   };
+}
+
+/* =========================================================
+   Installments & loans, grouped by bank — every bank takes its payment on one day of the month.
+   S.banks: { id, name, color, day, wallet, created }
+   S.loans: { id, bank, name, kind: 'inst' | 'credit', total, pay, rate, paid0 }
+   What's left is counted from the records: total − paid before tracking − payments marked with `loan`.
+   «Оплачено» on a bank writes one expense per purchase into «Рассрочки», tagged `bill: 'bank:<id>'`,
+   so the plan treats the bank's payment like any other mandatory one.
+   ========================================================= */
+const BANK_COLORS = { kaspi: '#d9480f', halyk: '#0f7a55', freedom: '#16a34a', jusan: '#ea580c', forte: '#be185d', bcc: '#1d4ed8', homecredit: '#dc2626', otbasy: '#0ea5e9' };
+const bankColor = name => BANK_COLORS[lowerRu(name).replace(/[^a-zа-я]/g, '')] || COLORS[[...name].reduce((a, c) => a + c.charCodeAt(0), 0) % COLORS.length];
+const findBank = id => S.banks.find(b => b.id === id);
+const addMonths = (d, k) => new Date(d.getFullYear(), d.getMonth() + k, 1);
+const monthName = d => `${MONTHS[d.getMonth()].toLowerCase()}${d.getFullYear() !== now.getFullYear() ? ' ' + d.getFullYear() : ''}`;
+const monthGen = d => `${MON_GEN[d.getMonth()]}${d.getFullYear() !== now.getFullYear() ? ' ' + d.getFullYear() : ''}`;
+
+function loanLeft(l) {
+  let left = l.total - (l.paid0 || 0);
+  const r = l.kind === 'credit' ? (l.rate || 0) / 1200 : 0;
+  // a credit's regular payment first covers the month's interest; an early one goes straight to the debt
+  for (const t of sortTx(S.tx.filter(t => t.loan === l.id)).reverse()) left -= t.early || !r ? t.amount : t.amount - left * r;
+  return Math.max(0, Math.round(left * 100) / 100);
+}
+const loanRate = l => (l.kind === 'credit' ? (l.rate || 0) / 1200 : 0);
+const loanDuePay = l => { const left = loanLeft(l); return Math.round(Math.min(l.pay, left * (1 + loanRate(l))) * 100) / 100; };
+function loanMonths(l, left = loanLeft(l), extra = 0) {
+  if (left <= 0) return 0;
+  const r = loanRate(l), p = l.pay + extra;
+  if (!r) return Math.ceil(left / p - 1e-9);
+  if (p <= left * r) return 999; // the payment doesn't even cover the interest
+  return Math.ceil(-Math.log(1 - (r * left) / p) / Math.log(1 + r) - 1e-9);
+}
+const activeLoans = bankId => S.loans.filter(l => (!bankId || l.bank === bankId) && loanLeft(l) > 0);
+
+// The next payment day of a bank; a passed one that wasn't marked paid comes back as late
+function bankDue(b) {
+  const t0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const paidNear = d => S.tx.some(t => t.bill === 'bank:' + b.id && t.date >= ymd(new Date(d.getFullYear(), d.getMonth(), d.getDate() - 20)));
+  const cur = dueIn(b, t0.getFullYear(), t0.getMonth());
+  if (cur < t0 && !paidNear(cur) && (b.created || '') <= ymd(cur)) return { due: cur, late: true };
+  let due = cur >= t0 ? cur : dueIn(b, t0.getFullYear(), t0.getMonth() + 1);
+  if (paidNear(due)) due = dueIn(b, due.getFullYear(), due.getMonth() + 1);
+  return { due, late: false };
+}
+
+// Banks with something left to pay, as mandatory payments for the plan
+function bankBills() {
+  const cat = catByName('Рассрочки');
+  return S.banks.map(b => ({ b, items: activeLoans(b.id) })).filter(x => x.items.length).map(({ b, items }) => ({
+    id: 'bank:' + b.id, bank: b.id, name: `${b.name} · рассрочки`, day: b.day, cat: cat?.id || '',
+    amount: Math.round(items.reduce((a, l) => a + loanDuePay(l), 0) * 100) / 100,
+  }));
+}
+const allBills = () => [...S.plan.bills, ...bankBills()];
+
+function instCategory() {
+  let c = catByName('Рассрочки');
+  if (!c) { c = { id: uid(), name: 'Рассрочки', icon: 'percent', color: '#8b5cf6', budget: 0 }; S.categories.push(c); }
+  return c;
+}
+
+// «Оплачено»: every purchase of the bank gets its own expense
+function payBank(bankId, back) {
+  const b = findBank(bankId), items = activeLoans(bankId);
+  if (!b || !items.length) return;
+  const w = find('wallet', b.wallet) && !isDep(b.wallet) ? b.wallet : usualWallet();
+  if (!w) return toast('Сначала добавьте кошелёк');
+  const undo = snapshot();
+  const cat = instCategory();
+  let sum = 0;
+  for (const l of items) {
+    const amount = loanDuePay(l);
+    sum += amount;
+    S.tx.push({ id: uid(), type: 'expense', from: w, to: cat.id, amount, date: today(), sub: l.name, note: '', bill: 'bank:' + b.id, loan: l.id, ts: Date.now() });
+  }
+  save();
+  render();
+  if (back) back(); else if (!sheetRoot.hidden) openLoans();
+  toast(`${b.name}: ${items.length} ${plural(items.length, ['платёж', 'платежа', 'платежей'])} · ${fmt(sum)}`, undo, true);
+}
+
+// Monthly load from now on: { months: [{ d, v }], ends: [{ l, from }] } — «when it gets lighter»
+function loanSchedule(extraFor = {}) {
+  const load = {}, ends = [];
+  let last = null;
+  for (const l of activeLoans()) {
+    const b = findBank(l.bank);
+    if (!b) continue;
+    const start = addMonths(bankDue(b).due, 0), r = loanRate(l), p = l.pay + (extraFor[l.id] || 0);
+    let left = loanLeft(l), k = 0;
+    while (left > 0.01 && k < 120) {
+      const d = addMonths(start, k), key = ymOf(d), pay = Math.min(p, left * (1 + r));
+      load[key] = (load[key] || 0) + pay;
+      left = left * (1 + r) - pay;
+      k++;
+    }
+    const lastM = addMonths(start, k - 1);
+    ends.push({ l, last: lastM, from: addMonths(lastM, 1) });
+    if (!last || lastM > last) last = lastM;
+  }
+  const months = [];
+  if (last) for (let d = monthOf(); d <= last && months.length < 48; d = addMonths(d, 1)) months.push({ d, v: load[ymOf(d)] || 0 });
+  return { months, ends: ends.sort((a, b) => a.from - b.from), free: last ? addMonths(last, 1) : null };
+}
+
+function avgIncome() {
+  let inc = 0, n = 0;
+  for (const k of [-3, -2, -1]) {
+    const y = ymOf(monthOf(k));
+    const v = S.tx.filter(t => t.type === 'income' && t.date.startsWith(y)).reduce((a, t) => a + t.amount, 0);
+    if (v) { inc += v; n++; }
+  }
+  return n ? inc / n : 0;
+}
+
+function loansBlock() {
+  const items = activeLoans();
+  if (!items.length) return `<div class="h2row"><h2>Рассрочки</h2></div>
+    <button class="dep-add" data-act="loans">${icon('plus')} Рассрочка или кредит</button>`;
+  const monthly = bankBills().reduce((a, b) => a + b.amount, 0);
+  const inc = avgIncome(), share = inc ? Math.round((monthly / inc) * 100) : null;
+  const sch = loanSchedule();
+  const next = S.banks.filter(b => activeLoans(b.id).length).map(b => ({ b, ...bankDue(b) })).sort((a, b) => a.due - b.due)[0];
+  const banks = new Set(items.map(l => l.bank)).size;
+  return `<div class="h2row"><h2>Рассрочки</h2><span class="total">${banks} ${plural(banks, ['банк', 'банка', 'банков'])} · ${items.length} ${plural(items.length, ['покупка', 'покупки', 'покупок'])}</span></div>
+    <button class="loan-card" data-act="loans">
+      <span class="lc-top"><span><small>Каждый месяц</small><b>${fmt0(monthly)}</b></span>${share !== null ? `<i class="${share >= 30 ? 'hi' : ''}">${share}% дохода</i>` : ''}</span>
+      <span class="lc-bar">${items.map(l => `<em style="flex:${loanDuePay(l)};background:${bankColorFor(l)}"></em>`).join('')}</span>
+      <span class="lc-row"><span>Следующий платёж</span><span><b>${next.late ? 'просрочен' : shortDate(next.due)}</b> · ${esc(next.b.name)} ${fmt0(bankBills().find(x => x.bank === next.b.id).amount)}</span></span>
+      ${sch.free ? `<span class="lc-row"><span>Свободен от рассрочек</span><b class="ok">${monthName(sch.free)}</b></span>` : ''}
+    </button>`;
+}
+// purchases of one bank share its colour, a little lighter for each next one
+function bankColorFor(l) {
+  const b = findBank(l.bank), list = S.loans.filter(x => x.bank === l.bank);
+  const i = list.indexOf(l);
+  return `color-mix(in srgb, ${b?.color || '#8b5cf6'} ${100 - i * 22}%, var(--text))`;
+}
+
+function openLoans() {
+  const items = activeLoans();
+  const monthly = bankBills().reduce((a, b) => a + b.amount, 0);
+  const left = items.reduce((a, l) => a + loanLeft(l), 0);
+  const inc = avgIncome(), share = inc ? Math.round((monthly / inc) * 100) : null;
+  const sch = loanSchedule();
+  const top = Math.max(1, ...sch.months.map(m => m.v));
+  const anyCredit = items.some(l => l.kind === 'credit' && l.rate > 0);
+  const banks = S.banks.filter(b => S.loans.some(l => l.bank === b.id));
+  const bankCard = b => {
+    const act = activeLoans(b.id), done = S.loans.filter(l => l.bank === b.id && loanLeft(l) <= 0);
+    if (!act.length && !done.length) return '';
+    const { due, late } = bankDue(b);
+    const sum = act.reduce((a, l) => a + loanDuePay(l), 0);
+    const soon = act.length && dayDiff(new Date(now.getFullYear(), now.getMonth(), now.getDate()), due) <= 3;
+    return `<div class="bank ${soon || late ? 'soon' : ''}">
+      <button class="bank-head" data-bank="${b.id}"><span class="bank-ava" style="${cv(b.color)}">${esc(b.name.slice(0, 1).toUpperCase())}</span>
+        <span class="tx-main"><div class="tx-title">${esc(b.name)}</div><div class="tx-sub">каждое ${b.day}-е${act.length ? ` · ${late ? 'просрочен' : shortDate(due)}` : ''}</div></span>
+        <b>${act.length ? fmt0(sum) : 'закрыто'}</b></button>
+      ${[...act, ...done].map(l => {
+        const lf = loanLeft(l), n = loanMonths(l), paidShare = l.total > 0 ? Math.min(1, 1 - lf / l.total) : 1;
+        const endM = n && n < 999 ? addMonths(due, n - 1) : null;
+        const tag = l.kind === 'credit' ? `${fmtRate(l.rate || 0)}%` : l.months ? `0-0-${l.months}` : '0%';
+        return `<button class="loan ${lf <= 0 ? 'closed' : ''}" data-loan="${l.id}">
+          <span class="loan-top"><i style="background:${bankColorFor(l)}"></i><span>${esc(l.name)}</span><small>${tag}</small><b>${lf > 0 ? fmt0(loanDuePay(l)) : ''}</b></span>
+          <span class="gbar"><em style="width:${paidShare * 100}%;background:${bankColorFor(l)}"></em></span>
+          <span class="loan-meta"><span>${lf > 0 ? `Осталось <b>${fmt0(lf)}</b>${n < 999 ? ` · ${n} ${plural(n, ['платёж', 'платежа', 'платежей'])}` : ''}` : 'Закрыта'}</span><span>${endM ? 'до ' + monthGen(endM) : ''}</span></span>
+        </button>`;
+      }).join('')}
+      ${act.length && (soon || late) ? `<div class="bank-pay"><span>${late ? 'Платёж просрочен' : dayDiff(new Date(now.getFullYear(), now.getMonth(), now.getDate()), due) === 0 ? 'Сегодня спишется' : `Через ${dayDiff(new Date(now.getFullYear(), now.getMonth(), now.getDate()), due)} ${plural(dayDiff(new Date(now.getFullYear(), now.getMonth(), now.getDate()), due), DAYS)} спишется`} <b>${fmt0(sum)}</b></span><button class="pay-btn" data-act="pay-bank" data-id="${b.id}">Оплачено</button></div>` : ''}
+    </div>`;
+  };
+  const sh = openSheet(`
+    ${sheetHead('Рассрочки и кредиты')}
+    ${items.length ? `<div class="pks">
+      <div class="pk"><span>В месяц</span><b>${fmt0(monthly)}</b>${share !== null ? `<small class="${share >= 30 ? 'hi' : ''}">${share}% дохода</small>` : ''}</div>
+      <div class="pk"><span>Осталось выплатить</span><b>${fmt0(left)}</b><small>${anyCredit ? 'без учёта процентов' : 'без переплаты'}</small></div>
+    </div>
+    ${sch.months.length > 1 ? `<div class="ladder">
+      <div class="ladder-h"><b>Когда станет легче</b><small>платёж в месяц</small></div>
+      <div class="ladder-bars">${sch.months.map(m => `<i style="height:${Math.max(3, (m.v / top) * 100)}%" title="${monthName(m.d)}: ${fmt0(m.v)}"></i>`).join('')}</div>
+      <div class="ladder-ax"><span>${monthName(sch.months[0].d)}</span><span>${monthName(sch.months[sch.months.length - 1].d)}</span></div>
+      ${sch.ends.map((e, i) => `<div class="ladder-end"><i style="background:${bankColorFor(e.l)}"></i><span>${capFirst(monthName(e.last))} — последний платёж «${esc(e.l.name)}»</span><b>${i === sch.ends.length - 1 ? 'свободен' : '−' + fmt0(e.l.pay)}</b></div>`).join('')}
+    </div>` : ''}` : '<div class="empty">Рассрочек и кредитов нет.</div>'}
+    ${banks.map(bankCard).join('')}
+    <div class="actions">
+      <button class="btn" id="ln-add">${icon('plus')} Добавить</button>
+      ${items.length ? '<button class="btn primary" id="ln-early">Закрыть досрочно</button>' : ''}
+    </div>`);
+  $('#ln-add', sh).onclick = () => openLoanForm();
+  $('#ln-early', sh)?.addEventListener('click', () => openPrepay());
+  sh.addEventListener('click', e => {
+    const l = e.target.closest('[data-loan]');
+    if (l) return openLoanForm(l.dataset.loan);
+    const b = e.target.closest('[data-bank]');
+    if (b) return openBankForm(b.dataset.bank);
+  });
+}
+
+function bankChips(sel) {
+  return `${S.banks.map(b => `<button type="button" class="chip ${b.id === sel ? 'on' : ''}" data-b="${b.id}">${esc(b.name)} · ${b.day}-го</button>`).join('')}
+    <button type="button" class="chip dashed ${sel === 'new' ? 'on' : ''}" data-b="new">+ Другой банк</button>`;
+}
+
+function openLoanForm(id) {
+  const ex = id ? S.loans.find(l => l.id === id) : null;
+  const ws = spendWallets();
+  if (!ws.length) return toast('Сначала добавьте кошелёк');
+  let kind = ex?.kind || 'inst', bank = ex?.bank || S.banks[0]?.id || 'new', months = ex?.months || 12, payTouched = !!ex;
+  const paidCount = ex && ex.pay ? Math.round((ex.paid0 || 0) / ex.pay) : 0;
+  const sh = openSheet(`
+    ${sheetHead(ex ? ex.name : 'Новая рассрочка')}
+    <div class="seg kind-seg" id="lf-kind"><button type="button" data-k="inst">Рассрочка 0%</button><button type="button" data-k="credit">Кредит</button></div>
+    <div class="field"><span id="lf-name-l">Что купил</span><input id="lf-name" maxlength="30" placeholder="iPhone, диван…" value="${esc(ex?.name || '')}" autocomplete="off" enterkeyhint="done"></div>
+    <div class="field col"><span>Банк</span><div class="chips" id="lf-banks">${bankChips(bank)}</div>
+      <div id="lf-newbank" class="newbank">
+        <div class="field"><span>Название банка</span><input id="lf-bname" maxlength="20" placeholder="Kaspi" autocomplete="off" enterkeyhint="done"></div>
+        <div class="field"><span>День платежа</span><select id="lf-bday">${Array.from({ length: 31 }, (_, i) => `<option value="${i + 1}" ${i + 1 === 10 ? 'selected' : ''}>${i + 1}-е</option>`).join('')}</select></div>
+        <div class="field"><span>Платить с</span><select id="lf-bw">${ws.map(w => `<option value="${w.id}" ${w.id === usualWallet() ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select></div>
+      </div>
+      <span class="hint" id="lf-bhint"></span></div>
+    <div id="lf-inst">
+      <div class="field"><span>Сумма покупки</span><input id="lf-total" inputmode="decimal" placeholder="0 ₸" value="${ex?.kind === 'inst' ? ex.total : ''}" enterkeyhint="done"></div>
+      <div class="field col"><span>Срок, месяцев</span><div class="mgrid" id="lf-months">${[3, 6, 12, 24].map(m => `<button type="button" data-m="${m}">${m}</button>`).join('')}<input id="lf-mo" inputmode="numeric" placeholder="другой" value="${[3, 6, 12, 24].includes(months) ? '' : months}"></div></div>
+      <div class="field"><span>Уже оплачено платежей</span><input id="lf-paid" inputmode="numeric" placeholder="0" value="${paidCount || ''}" enterkeyhint="done"></div>
+    </div>
+    <div id="lf-credit">
+      <div class="field"><span>Остаток долга</span><input id="lf-left" inputmode="decimal" placeholder="0 ₸" value="${ex?.kind === 'credit' ? ex.total - (ex.paid0 || 0) : ''}" enterkeyhint="done"></div>
+      <div class="field"><span>Ставка, % годовых</span><input id="lf-rate" inputmode="decimal" placeholder="0" value="${ex?.rate ? String(ex.rate).replace('.', ',') : ''}" enterkeyhint="done"></div>
+    </div>
+    <div class="field"><span>Платёж в месяц</span><input id="lf-pay" inputmode="decimal" placeholder="0 ₸" value="${ex?.pay || ''}" enterkeyhint="done"></div>
+    <div class="vnote ok" id="lf-sum"></div>
+    <div class="actions">
+      ${ex ? `<button class="btn danger" id="lf-del" aria-label="Удалить">${icon('trash-2')}</button>` : ''}
+      ${S.loans.length ? '<button class="btn" id="lf-back">Назад</button>' : ''}
+      <button class="btn primary" id="lf-save">Сохранить</button>
+    </div>`);
+  const v = sel => money($(sel, sh).value) || 0;
+  const paint = () => {
+    $$('#lf-kind button', sh).forEach(b => b.classList.toggle('on', b.dataset.k === kind));
+    $('#lf-inst', sh).hidden = kind !== 'inst';
+    $('#lf-credit', sh).hidden = kind !== 'credit';
+    $('#lf-name-l', sh).textContent = kind === 'inst' ? 'Что купил' : 'Название';
+    $('#lf-banks', sh).innerHTML = bankChips(bank);
+    $('#lf-newbank', sh).hidden = bank !== 'new';
+    const b = findBank(bank);
+    $('#lf-bhint', sh).textContent = b ? `Платёж спишется ${b.day}-го вместе с остальными «${b.name}».` : 'У нового банка нужен день платежа.';
+    const mo = +$('#lf-mo', sh).value || months;
+    $$('#lf-months button', sh).forEach(x => x.classList.toggle('on', +x.dataset.m === mo && !$('#lf-mo', sh).value));
+    if (kind === 'inst' && !payTouched && v('#lf-total') > 0) $('#lf-pay', sh).value = groupDigits(String(Math.round(v('#lf-total') / mo)));
+    // summary
+    const pay = v('#lf-pay');
+    let txt = '';
+    if (kind === 'inst' && v('#lf-total') > 0 && pay > 0) {
+      const left = Math.max(0, v('#lf-total') - pay * (+$('#lf-paid', sh).value || 0)), n = Math.ceil(left / pay - 1e-9);
+      const day = b ? b.day : +$('#lf-bday', sh).value;
+      const last = n ? addMonths(dueIn({ day }, now.getFullYear(), now.getMonth() + (now.getDate() > day ? 1 : 0)), n - 1) : null;
+      txt = n ? `Осталось ${fmt0(left)} · ${n} ${plural(n, ['платёж', 'платежа', 'платежей'])} · последний — ${monthName(last)}` : 'Уже полностью оплачена';
+    } else if (kind === 'credit' && v('#lf-left') > 0 && pay > 0) {
+      const n = loanMonths({ kind: 'credit', rate: money($('#lf-rate', sh).value) || 0, pay }, v('#lf-left'));
+      txt = n >= 999 ? 'Платёж меньше процентов — долг не уменьшается' : `≈ ${n} ${plural(n, ['платёж', 'платежа', 'платежей'])}, переплата ≈ ${fmt0(Math.max(0, pay * n - v('#lf-left')))}`;
+    }
+    $('#lf-sum', sh).textContent = txt;
+    $('#lf-sum', sh).hidden = !txt;
+  };
+  paint();
+  sh.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.tagName === 'INPUT') e.target.blur(); });
+  sh.addEventListener('input', e => { if (e.target.id === 'lf-pay') payTouched = true; if (e.target.id === 'lf-mo') months = +e.target.value || months; paint(); });
+  sh.addEventListener('change', paint);
+  sh.addEventListener('click', e => {
+    const k = e.target.closest('[data-k]'); if (k) { kind = k.dataset.k; return paint(); }
+    const b = e.target.closest('[data-b]'); if (b) { bank = b.dataset.b; return paint(); }
+    const m = e.target.closest('[data-m]'); if (m) { months = +m.dataset.m; $('#lf-mo', sh).value = ''; payTouched = false; return paint(); }
+  });
+  $('#lf-back', sh)?.addEventListener('click', openLoans);
+  $('#lf-save', sh).onclick = () => {
+    const name = $('#lf-name', sh).value.trim();
+    if (!name) return shake($('#lf-name', sh).closest('.field'));
+    const pay = v('#lf-pay');
+    if (!(pay > 0)) return shake($('#lf-pay', sh).closest('.field'));
+    let bankId = bank;
+    const undo = snapshot();
+    if (bank === 'new') {
+      const bn = $('#lf-bname', sh).value.trim();
+      if (!bn) return shake($('#lf-bname', sh).closest('.field'));
+      const nb = { id: uid(), name: bn, color: bankColor(bn), day: +$('#lf-bday', sh).value, wallet: $('#lf-bw', sh).value, created: today() };
+      S.banks.push(nb);
+      bankId = nb.id;
+    }
+    const rec = { id: ex?.id || uid(), bank: bankId, name, kind, pay };
+    if (kind === 'inst') {
+      const total = v('#lf-total');
+      if (!(total > 0)) return shake($('#lf-total', sh).closest('.field'));
+      Object.assign(rec, { total, months: +$('#lf-mo', sh).value || months, paid0: Math.min(total, pay * (+$('#lf-paid', sh).value || 0)) });
+    } else {
+      const left = v('#lf-left');
+      if (!(left > 0)) return shake($('#lf-left', sh).closest('.field'));
+      // keep payments already recorded: the new «left» is what's owed now
+      Object.assign(rec, { total: left + (ex ? loanPaidPrincipal(ex) : 0), paid0: 0, rate: money($('#lf-rate', sh).value) || 0 });
+    }
+    if (ex) Object.assign(ex, rec); else S.loans.push(rec);
+    save();
+    render();
+    openLoans();
+    toast(ex ? 'Изменено' : `«${name}» добавлена`, undo, !ex);
+  };
+  $('#lf-del', sh)?.addEventListener('click', () => {
+    if (!confirm(`Удалить «${ex.name}»? Записанные платежи останутся в расходах.`)) return;
+    const undo = snapshot();
+    S.loans = S.loans.filter(l => l.id !== ex.id);
+    S.tx.forEach(t => { if (t.loan === ex.id) delete t.loan; });
+    S.banks = S.banks.filter(b => S.loans.some(l => l.bank === b.id));
+    save();
+    render();
+    S.loans.length ? openLoans() : closeSheet();
+    toast('Удалено', undo);
+  });
+}
+// how much of a credit's principal the recorded payments already covered (to keep them when the balance is re-entered)
+const loanPaidPrincipal = l => Math.max(0, l.total - (l.paid0 || 0) - loanLeft(l));
+
+function openBankForm(id) {
+  const b = findBank(id);
+  if (!b) return;
+  const ws = spendWallets();
+  const sh = openSheet(`
+    ${sheetHead(b.name)}
+    <div class="field"><span>Название</span><input id="bf-name" maxlength="20" value="${esc(b.name)}" autocomplete="off" enterkeyhint="done"></div>
+    <div class="field"><span>День платежа</span><select id="bf-day">${Array.from({ length: 31 }, (_, i) => `<option value="${i + 1}" ${i + 1 === b.day ? 'selected' : ''}>${i + 1}-е</option>`).join('')}</select></div>
+    <div class="field"><span>Платить с</span><select id="bf-w">${ws.map(w => `<option value="${w.id}" ${w.id === b.wallet ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select></div>
+    <p class="set-note" style="padding:10px 0 0">Все рассрочки и кредиты этого банка списываются в один день.</p>
+    <div class="actions"><button class="btn" id="bf-back">Назад</button><button class="btn primary" id="bf-save">Сохранить</button></div>`);
+  $('#bf-back', sh).onclick = openLoans;
+  $('#bf-save', sh).onclick = () => {
+    const name = $('#bf-name', sh).value.trim();
+    if (!name) return shake($('#bf-name', sh).closest('.field'));
+    Object.assign(b, { name, day: +$('#bf-day', sh).value, wallet: $('#bf-w', sh).value });
+    save();
+    render();
+    openLoans();
+  };
+}
+
+/* ---------- paying off early ---------- */
+// Spread a one-off sum: close whole purchases that free the most per tenge first, then shorten the dearest/next one
+function prepayPlan(amount) {
+  let rest = amount;
+  const items = activeLoans().map(l => ({ l, left: loanLeft(l) }));
+  const alloc = [];
+  // closing a whole purchase frees its payment; prefer the ones that free most per tenge spent
+  const closable = items.filter(x => x.left <= rest).sort((a, b) => b.l.pay / b.left - a.l.pay / a.left);
+  for (const x of closable) if (x.left <= rest) { alloc.push({ l: x.l, amount: x.left, closes: true }); rest -= x.left; }
+  if (rest >= 1) {
+    const open = items.filter(x => !alloc.some(a => a.l === x.l));
+    // what's left goes where it matters most: the highest rate, else the one closest to its end
+    const t = open.sort((a, b) => loanRate(b.l) - loanRate(a.l) || a.left / a.l.pay - b.left / b.l.pay)[0];
+    if (t) alloc.push({ l: t.l, amount: Math.min(rest, t.left), closes: rest >= t.left });
+  }
+  return alloc;
+}
+// interest left to pay on a credit (0 for installments) — what an early payment saves
+function interestLeft(l, left = loanLeft(l), extra = 0) {
+  const r = loanRate(l);
+  if (!r) return 0;
+  let paid = 0, k = 0;
+  while (left > 0.01 && k++ < 600) { const p = Math.min(l.pay + extra, left * (1 + r)); paid += p; left = left * (1 + r) - p; }
+  return Math.max(0, paid - loanLeft(l));
+}
+
+function openPrepay(mode = 'once', amt = '') {
+  const items = activeLoans();
+  if (!items.length) return openLoans();
+  const sh = openSheet(`
+    ${sheetHead('Закрыть досрочно')}
+    <div class="seg kind-seg" id="pp-mode"><button type="button" data-m="once" class="${mode === 'once' ? 'on' : ''}">Разово</button><button type="button" data-m="month" class="${mode === 'month' ? 'on' : ''}">Каждый месяц</button></div>
+    <div class="amount"><input id="pp-amt" inputmode="decimal" placeholder="0" value="${amt}" autocomplete="off"><span>₸</span></div>
+    <div class="bal-note">${mode === 'once' ? 'Сколько готов направить сейчас' : 'Сколько готов доплачивать каждый месяц'}</div>
+    <div id="pp-out"></div>
+    <div class="actions" id="pp-acts"></div>`);
+  const inp = $('#pp-amt', sh);
+  fitAmount(inp);
+  const deps = S.wallets.filter(w => w.dep && w.rate > 0).sort((a, b) => b.rate - a.rate);
+  const fmtEnd = (l, n) => monthName(addMonths(bankDue(findBank(l.bank)).due, n - 1));
+  const paint = () => {
+    const a = money(inp.value) || 0, out = $('#pp-out', sh);
+    $('#pp-acts', sh).innerHTML = '';
+    if (!(a > 0)) { out.innerHTML = ''; return; }
+    const allZero = items.every(l => !loanRate(l));
+    let best = '', rows = '';
+    if (mode === 'once') {
+      const plan = prepayPlan(a);
+      const freed = plan.filter(x => x.closes).reduce((s, x) => s + x.l.pay, 0);
+      const saved = plan.reduce((s, x) => s + interestLeft(x.l) - interestLeft(x.l, loanLeft(x.l) - x.amount), 0);
+      const parts = plan.map(x => x.closes ? `закрой «${esc(x.l.name)}» целиком — ${fmt0(x.amount)}`
+        : `${fmt0(x.amount)} — в «${esc(x.l.name)}»: закончится ${(() => { const n0 = loanMonths(x.l), n1 = loanMonths(x.l, loanLeft(x.l) - x.amount); return n0 - n1 > 0 ? `на ${n0 - n1} мес раньше, в ${MON_PREP[addMonths(bankDue(findBank(x.l.bank)).due, n1 - 1).getMonth()]}` : 'в тот же месяц, но последний платёж меньше'; })()}`);
+      best = `<div class="pp-best"><small>ЛУЧШИЙ ВАРИАНТ</small><b>${capFirst(parts.join('; '))}.</b>
+        ${freed ? `<span>Со следующего платежа свободно <b>+${fmt0(freed)} в месяц</b>.</span>` : ''}${saved >= 1 ? `<span>Экономия на процентах ≈ <b>${fmt0(saved)}</b>.</span>` : ''}</div>`;
+      rows = items.map(l => {
+        const lf = loanLeft(l), n0 = loanMonths(l);
+        if (a >= lf) return `<div><i style="background:${bankColorFor(l)}"></i><span>${esc(l.name)}</span><small class="ok">закрыта · +${fmt0(l.pay)}/мес</small></div>`;
+        const n1 = loanMonths(l, lf - a), sv = interestLeft(l) - interestLeft(l, lf - a);
+        return `<div><i style="background:${bankColorFor(l)}"></i><span>${esc(l.name)}</span><small>${n0 - n1 > 0 ? `на ${n0 - n1} мес раньше · ${fmtEnd(l, n1)}` : 'срок тот же'}${sv >= 1 ? ` · −${fmt0(sv)} %` : ''}</small></div>`;
+      }).join('');
+      $('#pp-acts', sh).innerHTML = `<button class="btn primary" id="pp-rec">Записать досрочный платёж</button>`;
+      $('#pp-rec', sh).onclick = () => {
+        const undo = snapshot(), cat = instCategory();
+        for (const x of plan) {
+          const b = findBank(x.l.bank), w = find('wallet', b?.wallet) && !isDep(b.wallet) ? b.wallet : usualWallet();
+          S.tx.push({ id: uid(), type: 'expense', from: w, to: cat.id, amount: Math.round(x.amount * 100) / 100, date: today(), sub: x.l.name, note: 'досрочно', loan: x.l.id, early: true, ts: Date.now() });
+        }
+        save();
+        render();
+        openLoans();
+        toast(`Досрочно: ${fmt0(a)}`, undo, true);
+      };
+    } else {
+      // every month the extra goes to the purchase that ends soonest; when it's closed, its payment rolls on
+      const before = loanSchedule().free;
+      const order = [...items].sort((x, y) => loanRate(y) - loanRate(x) || loanLeft(x) / x.pay - loanLeft(y) / y.pay);
+      const after = loanSchedule({ [order[0].id]: a }).free;
+      best = `<div class="pp-best"><small>ЕСЛИ ДОПЛАЧИВАТЬ ${fmt0(a).toUpperCase()} В МЕСЯЦ</small><b>Направляй их в «${esc(order[0].name)}» — ${order[0].kind === 'credit' && order[0].rate ? 'у неё самая высокая ставка' : 'она закончится раньше всех'}.</b>
+        <span>«${esc(order[0].name)}» закроется ${fmtEnd(order[0], loanMonths(order[0], loanLeft(order[0]), a))} вместо ${fmtEnd(order[0], loanMonths(order[0]))}. Потом переключай доплату на следующую.</span>
+        ${before && after && after < before ? `<span>Свободен от всех рассрочек: <b>${monthName(after)}</b> вместо ${monthName(before)}.</span>` : ''}</div>`;
+      rows = items.map(l => {
+        const n0 = loanMonths(l), n1 = loanMonths(l, loanLeft(l), a), sv = interestLeft(l) - interestLeft(l, loanLeft(l), a);
+        return `<div><i style="background:${bankColorFor(l)}"></i><span>${esc(l.name)}</span><small>${n0 - n1 > 0 ? `на ${n0 - n1} мес раньше · ${fmtEnd(l, n1)}` : 'срок тот же'}${sv >= 1 ? ` · −${fmt0(sv)} %` : ''}</small></div>`;
+      }).join('');
+    }
+    // the honest part: 0% needs no hurry, and a deposit may earn more than a credit costs
+    let note = '';
+    const dep = deps[0], maxRate = Math.max(0, ...items.map(l => (l.kind === 'credit' ? l.rate || 0 : 0)));
+    if (allZero) note = `Рассрочка 0% — переплаты нет, и досрочка <b>не экономит</b> деньги, а только раньше освобождает платёж.${dep ? ` Если ${fmt0(a)} не нужны раньше, на «${esc(dep.name)}» ${fmtRate(dep.rate)}% они принесут около ${fmt0((a * dep.rate) / 1200)} в месяц.` : ''}`;
+    else if (dep && dep.rate > maxRate) note = `Депозит «${esc(dep.name)}» (${fmtRate(dep.rate)}%) приносит больше, чем стоит самый дорогой кредит (${fmtRate(maxRate)}%) — выгоднее держать деньги на депозите и платить по графику.`;
+    else if (dep) note = `Кредит под ${fmtRate(maxRate)}% дороже, чем приносит депозит «${esc(dep.name)}» (${fmtRate(dep.rate)}%) — гасить досрочно выгоднее.`;
+    out.innerHTML = `${best}<div class="label">${mode === 'once' ? 'Если всё в одну покупку' : 'Если всю доплату в одну покупку'}</div><div class="pp-rows">${rows}</div>
+      ${note ? `<div class="pp-note">${icon('piggy-bank')}<span>${note}</span></div>` : ''}`;
+  };
+  paint();
+  inp.addEventListener('input', paint);
+  $('#pp-mode', sh).onclick = e => { const b = e.target.closest('[data-m]'); if (b) openPrepay(b.dataset.m, inp.value); };
+  setTimeout(() => inp.focus(), 300);
 }
 
 /* ---------- debts: sheets ---------- */
@@ -2205,7 +2653,7 @@ function insights() {
   }
 
   // 5. bills and subscriptions against income
-  const billsSum = S.plan.bills.reduce((a, b) => a + b.amount, 0);
+  const billsSum = allBills().reduce((a, b) => a + b.amount, 0);
   if (billsSum > 0) {
     let inc = 0, n = 0;
     for (const k of [-3, -2, -1]) {
@@ -2220,7 +2668,7 @@ function insights() {
         id: `bills:${ym}:${pct}`, label: 'Платежи', icon: 'repeat', color: '#8b5cf6',
         title: `Платежи и подписки — ${pct}% дохода`,
         text: `${fmt0(billsSum)} в месяц при среднем доходе ${fmt0(inc / n)}.`,
-        rows: [...S.plan.bills].sort((a, b) => b.amount - a.amount).slice(0, 5).map(b => [b.name, fmt0(b.amount)]),
+        rows: allBills().sort((a, b) => b.amount - a.amount).slice(0, 5).map(b => [b.name, fmt0(b.amount)]),
         action: ['Открыть план трат', () => openPlan()],
       });
     }
@@ -2745,6 +3193,7 @@ function renderSettings() {
       <button class="set-row" data-act="plan">${icon('calendar')}План трат<small>${S.plan.on ? 'Зарплата ' + S.plan.paydays.join(' и ') : 'Выключен'}</small></button>
       <button class="set-row" data-act="quick-manage">${icon('zap')}Быстрые траты<small>${S.quick.length}</small></button>
       <button class="set-row" data-act="bills">${icon('repeat')}Платежи и подписки<small>${S.plan.bills.length}</small></button>
+      <button class="set-row" data-act="loans">${icon('credit-card')}Рассрочки и кредиты<small>${S.loans.filter(l => loanLeft(l) > 0).length}</small></button>
       <button class="set-row" data-act="applepay">${icon('credit-card')}Apple Pay<small>${INBOX.ready ? 'подключён' : 'выключен'}</small></button>
       <button class="set-row" data-act="ai">${icon('key-round')}ИИ (OpenAI)<small>${AI.key ? 'подключён' : 'нет ключа'}</small></button>
     </div>
@@ -2783,7 +3232,7 @@ function renderSettings() {
     <div class="set-list">
       <button class="set-row danger" data-act="reset">${icon('trash-2')}Стереть все данные</button>
     </div>
-    <div class="set-note">Деньги · v2.4 · работает без интернета</div>`;
+    <div class="set-note">Деньги · v2.5 · работает без интернета</div>`;
 }
 
 async function exportData() {
@@ -3038,6 +3487,8 @@ const ACTIONS = {
   },
   'dep-no': () => { S.plan.depAsked = true; save(); render(); },
   debts: el => { clearSel(); openDebts(el.dataset.dir); },
+  loans: () => { clearSel(); S.loans.length ? openLoans() : openLoanForm(); },
+  'pay-bank': el => { clearSel(); payBank(el.dataset.id); },
   voice: () => { clearSel(); openVoice(); },
   story: el => { clearSel(); openStory(+el.dataset.i); },
   ai: () => openAISettings(),
