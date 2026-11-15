@@ -443,21 +443,46 @@ function renderHome() {
 
 /* ---------- deposits: a stack of cards; a tap fans it out ---------- */
 const fmtRate = r => String(r).replace('.', ',');
-const goalMonth = ym => { const [y, m] = ym.split('-').map(Number); return `${MON_GEN[m - 1]}${y !== now.getFullYear() ? ' ' + y : ''}`; };
+
+const goalBy = ym => { const [y, m] = ym.split('-').map(Number); return `${MON_DAT[m - 1]}${y !== now.getFullYear() ? ' ' + y : ''}`; };
+
+// How much to top up every month to reach the goal by its month. The deposit's own interest helps
+// (compounded monthly), so it's a bit less than «what's left ÷ months».
+function goalPlan(w, bal) {
+  if (!(w.goalAmount > 0)) return null;
+  if (bal >= w.goalAmount) return { done: true };
+  if (!w.goalDate) return { noDate: true };
+  const [y, m] = w.goalDate.split('-').map(Number);
+  const n = (y - now.getFullYear()) * 12 + (m - 1 - now.getMonth());
+  if (n <= 0) return { late: true };
+  const r = (w.rate || 0) / 1200, g = (1 + r) ** n;
+  const pmt = r ? ((w.goalAmount - bal * g) * r) / (g - 1) : (w.goalAmount - bal) / n;
+  return { n, pmt: Math.max(0, pmt) };
+}
+function goalLine(w, gp) {
+  if (!gp) return '';
+  if (gp.done) return 'Цель достигнута';
+  if (gp.noDate) return 'Задайте срок цели — посчитаю, сколько откладывать';
+  if (gp.late) return 'Срок цели прошёл';
+  if (gp.pmt < 1) return `Цель наберётся на процентах к ${goalBy(w.goalDate)}`;
+  return `Откладывать по <b>${fmt0(gp.pmt)}</b> в месяц, чтобы успеть к ${goalBy(w.goalDate)}`;
+}
 
 function depCard(w, bal, top) {
   const pct = w.goalAmount > 0 ? Math.min(1, Math.max(0, bal / w.goalAmount)) : null;
   const monthly = w.rate > 0 && bal > 0 ? (bal * w.rate) / 100 / 12 : 0;
+  const gl = goalLine(w, goalPlan(w, bal));
   return `<button class="tile dep" data-kind="wallet" data-id="${w.id}" style="${cv(w.color)}${top !== undefined ? ';' + top : ''}">
     <span class="coin">${icon(w.icon)}</span>
     <span class="dhead"><span class="dot"></span><span class="tname">${esc(w.name)}${w.goal ? ' · ' + esc(w.goal) : ''}</span>${w.rate ? `<span class="rate">${fmtRate(w.rate)}%</span>` : ''}</span>
     <span class="tamt">${fmt(bal)}</span>
     ${pct !== null ? `<span class="gbar"><i style="width:${pct * 100}%"></i></span>` : ''}
-    <span class="dmeta"><span>${pct !== null ? `<b>${Math.floor(pct * 100)}%</b> из ${fmt(w.goalAmount)}${w.goalDate ? ' · к ' + goalMonth(w.goalDate) : ''}` : 'без цели'}</span>${monthly ? `<span>≈ +${fmt0(monthly)}/мес</span>` : ''}</span>
+    <span class="dmeta"><span>${pct !== null ? `<b>${Math.floor(pct * 100)}%</b> из ${fmt(w.goalAmount)}` : 'без цели'}</span>${monthly ? `<span>проценты ≈ +${fmt0(monthly)}/мес</span>` : ''}</span>
+    ${gl ? `<span class="dneed">${gl}</span>` : ''}
   </button>`;
 }
 
-const STACK_PEEK = 46, STACK_CARD = 148, STACK_MAX = 4;
+const STACK_PEEK = 46, STACK_CARD = 172, STACK_MAX = 4;
 // deposits in the order the stack shows them: the last one brought forward comes first
 function depsOrdered() {
   const order = pref.get('depOrder', []);
@@ -474,8 +499,7 @@ function depositsBlock(bal) {
     <span class="dep-offer-btns"><button class="chip on" data-act="dep-yes" data-id="${cand.id}">Да, депозит</button><button class="chip" data-act="dep-no">Нет</button></span></div>` : '';
   if (!deps.length) return offer ? `<div class="h2row"><h2>Накопления</h2></div>${offer}` : '';
   const total = deps.reduce((a, w) => a + (bal[w.id] || 0), 0);
-  const monthly = deps.reduce((a, w) => a + (w.rate > 0 && bal[w.id] > 0 ? (bal[w.id] * w.rate) / 1200 : 0), 0);
-  const head = `<div class="h2row"><h2>Накопления</h2><span class="total">${fmt(total)}${monthly ? ` · ≈ +${fmt0(monthly)}/мес` : ''}</span></div>`;
+  const head = `<div class="h2row"><h2>Накопления</h2><span class="total">${fmt(total)}</span></div>`;
   const add = `<button class="dep-add" data-act="new-dep">${icon('plus')} Новый депозит</button>`;
   if (deps.length === 1) return head + offer + `<div class="stack">${depCard(deps[0], bal[deps[0].id] || 0)}</div>` + add;
   if (UI.stackOpen) return head + offer + `<div class="stack open">${deps.map(w => depCard(w, bal[w.id] || 0)).join('')}</div>
@@ -2209,12 +2233,8 @@ function insights() {
     const left = dep.goalAmount - (bal[dep.id] || 0);
     const since = ymd(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 90));
     const inflow = S.tx.filter(t => t.to === dep.id && t.date >= since && (t.type === 'transfer' || t.type === 'income')).reduce((a, t) => a + t.amount, 0) / 3;
-    let need = '';
-    if (dep.goalDate) {
-      const [y, mo] = dep.goalDate.split('-').map(Number);
-      const months = (y - now.getFullYear()) * 12 + (mo - 1 - now.getMonth());
-      if (months > 0) need = ` Чтобы успеть к ${MON_DAT[mo - 1]}${y !== now.getFullYear() ? ' ' + y : ''}, нужно ${fmt0(left / months)} в месяц.`;
-    }
+    const gp = goalPlan(dep, bal[dep.id] || 0);
+    const need = gp?.pmt >= 1 ? ` Чтобы успеть к ${goalBy(dep.goalDate)}, откладывай по ${fmt0(gp.pmt)} в месяц (с учётом процентов).` : '';
     out.push({
       id: `goal:${dep.id}:${Math.round(left / 50000)}`, label: dep.goal || dep.name, icon: dep.icon, color: dep.color,
       title: `До цели «${dep.goal || dep.name}» осталось ${fmt0(left)}`,
