@@ -112,6 +112,7 @@ function normalize(d) {
   d.plan.exclude = d.plan.exclude || [];
   d.quick = d.quick || [];
   d.debts = d.debts || [];
+  d.aliases = d.aliases || {}; // Apple Pay merchant as the bank sends it → the name you gave it
   if ((d.v || 1) < 2) {
     // v2: the app went Russian — rename the untouched English defaults
     const RU = { Salary: 'Зарплата', Other: 'Другое', Cash: 'Наличные', Groceries: 'Продукты', Cafe: 'Кафе',
@@ -220,10 +221,18 @@ function sums(txs) {
   return { inc, exp, totalInc, totalExp };
 }
 
-function subsFor(catId) {
-  const c = {};
-  for (const t of S.tx) if (t.type === 'expense' && t.to === catId && t.sub) c[t.sub] = (c[t.sub] || 0) + 1;
-  return Object.keys(c).sort((a, b) => c[b] - c[a]);
+// Descriptions used in a category, most frequent first. With `all` false only the ones worth a chip:
+// used at least twice, or within the last 30 days — a shop visited once in your life fades away.
+function subsFor(catId, all = true) {
+  const c = {}, last = {};
+  for (const t of S.tx) {
+    if (t.type !== 'expense' || t.to !== catId || !t.sub) continue;
+    c[t.sub] = (c[t.sub] || 0) + 1;
+    if (!last[t.sub] || t.date > last[t.sub]) last[t.sub] = t.date;
+  }
+  const since = ymd(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 30));
+  return Object.keys(c).filter(k => all || c[k] >= 2 || last[k] >= since)
+    .sort((a, b) => c[b] - c[a] || (last[b] > last[a] ? 1 : -1));
 }
 
 const sortTx = arr => arr.sort((a, b) => (b.date < a.date ? -1 : b.date > a.date ? 1 : (b.ts || 0) - (a.ts || 0)));
@@ -1469,7 +1478,8 @@ function openTx(o) {
   const paintChips = () => {
     if (!fSub) return;
     const q = fSub.value.trim().toLowerCase();
-    const all = subsFor(fTo.value);
+    // typing searches everything; otherwise only the descriptions you actually repeat
+    const all = subsFor(fTo.value, !!q);
     const shown = all.filter(s => !q || s.toLowerCase().includes(q)).slice(0, 14);
     $('#sub-chips', sh).innerHTML = shown.map(s =>
       `<button type="button" class="chip ${s === fSub.value.trim() ? 'on' : ''}" data-sub="${esc(s)}">${esc(s)}</button>`).join('');
@@ -2011,10 +2021,17 @@ function renderAnalytics() {
         const open = UI.openCat === c.id;
         let subs = '';
         if (open) {
-          const by = {};
+          const by = {}, n = {};
           exps.filter(t => (c.id === '_del' ? !find('category', t.to) : t.to === c.id))
-            .forEach(t => { const k = t.sub || 'Без описания'; by[k] = (by[k] || 0) + t.amount; });
-          const rows = Object.entries(by).sort((a, b) => b[1] - a[1]);
+            .forEach(t => { const k = t.sub || 'Без описания'; by[k] = (by[k] || 0) + t.amount; n[k] = (n[k] || 0) + 1; });
+          let rows = Object.entries(by).sort((a, b) => b[1] - a[1]);
+          // past the biggest few, places visited once fold into one line
+          const once = rows.slice(6).filter(([k]) => n[k] === 1);
+          if (once.length >= 2) {
+            const fold = new Set(once.map(([k]) => k));
+            rows = [...rows.filter(([k]) => !fold.has(k)), [`Разовые покупки · ${once.length}`, once.reduce((a, [, v]) => a + v, 0)]]
+              .sort((a, b) => b[1] - a[1]);
+          }
           const sm = rows[0][1];
           subs = `<div class="subs" style="${cv(c.color)}">${rows.map(([n, v]) =>
             `<div class="subrow"><span>${esc(n)}</span><b>${fmt(v)}</b></div><div class="bar"><i style="width:${(v / sm) * 100}%"></i></div>`).join('')}
@@ -2429,7 +2446,7 @@ function openVoiceReview(items, text, note = '', opts = {}) {
     ${S.categories.map(c => `<option value="${c.id}" ${c.id === it.to ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}`;
   const row = (it, i) => `<div class="vrow" data-i="${i}">
     <div class="vrow-top">
-      <input class="v-sub" value="${esc(it.sub)}" placeholder="На что" maxlength="40" autocomplete="off" enterkeyhint="done">
+      <label class="v-subw">${icon('pencil')}<input class="v-sub" value="${esc(it.sub)}" placeholder="${it.raw ? 'Название' : 'На что'}" maxlength="40" autocomplete="off" enterkeyhint="done" aria-label="${it.raw ? 'Название продавца' : 'На что'}"></label>
       <input class="v-amt" inputmode="decimal" value="${it.amount}" autocomplete="off" enterkeyhint="done"><span class="v-cur">₸</span>
       <button class="icon-btn v-del" aria-label="Убрать">${icon('x')}</button>
     </div>
@@ -2437,7 +2454,8 @@ function openVoiceReview(items, text, note = '', opts = {}) {
       <select class="v-cat ${it.to || it.newCat ? '' : 'need'}">${catOpts(it)}</select>
       <select class="v-w">${spendWallets().map(w => `<option value="${w.id}" ${w.id === it.from ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select>
     </div>
-    ${it.date !== today() || it.card ? `<div class="v-date">${[it.date !== today() ? dayLabel(it.date) : '', it.card ? esc(it.card) : ''].filter(Boolean).join(' · ')}</div>` : ''}
+    ${it.date !== today() || it.card || it.raw ? `<div class="v-date">${[it.date !== today() ? dayLabel(it.date) : '', it.card ? esc(it.card) : '',
+      it.raw && lowerRu(it.raw) !== lowerRu(it.sub) ? `в банке: ${esc(it.raw.trim().slice(0, 40))}` : ''].filter(Boolean).join(' · ')}</div>` : ''}
   </div>`;
   const sh = openSheet(`
     ${sheetHead(opts.title || 'Проверьте')}
@@ -2485,6 +2503,11 @@ function openVoiceReview(items, text, note = '', opts = {}) {
       const t = { id: uid(), type: 'expense', from: x.from, to: x.to, amount: x.amount, date: x.it.date, sub: x.sub, note: '', ts: Date.now() };
       if (x.it.ext) t.ext = x.it.ext; // Apple Pay inbox row id — never import it twice
       if (x.it.card) t.card = x.it.card;
+      // remember a renamed Apple Pay merchant, so next time it arrives with your name
+      if (x.it.raw && x.sub) {
+        const k = merchantKey(x.it.raw);
+        if (x.sub !== tidyMerchant(x.it.raw)) S.aliases[k] = x.sub; else delete S.aliases[k];
+      }
       S.tx.push(t);
     }
     UI.bump = recs[recs.length - 1].to;
@@ -2563,10 +2586,15 @@ function looseAmount(v) {
   return Math.round(parseFloat(s) * 100) / 100;
 }
 // «MAGNUM CASH&CARRY» → «Magnum Cash&carry»; normal names stay as they are
+// «ТОО "MAGNUM CASH&CARRY"» → «Magnum Cash&carry»: legal forms and quotes go, shouting gets calm
 const tidyMerchant = m => {
-  m = String(m || '').replace(/\s+/g, ' ').trim().slice(0, 40);
-  return /[a-zа-яё]/.test(m) ? m : m.toLowerCase().replace(/(^|[\s-])(\S)/g, (x, a, b) => a + b.toUpperCase());
+  m = String(m || '').replace(/["«»“”'`]/g, ' ').replace(/\s+/g, ' ').trim()
+    .replace(/^(?:ИП|ТОО|АО|ПК|ЧП|TOO|LLP|IP|LLC|JSC)\.?\s+/i, '').trim().slice(0, 40);
+  return /[a-zа-яё]/.test(m) ? m : m.toLowerCase().replace(/(^|[\s.-])(\S)/g, (x, a, b) => a + b.toUpperCase());
 };
+const merchantKey = m => lowerRu(String(m || '').replace(/\s+/g, ' '));
+// the name you gave this merchant last time, else a tidied version of the bank's one
+const merchantName = raw => S.aliases[merchantKey(raw)] || tidyMerchant(raw);
 // the wallet this card paid from last time, else one whose name appears in the card's name
 function walletForCard(card) {
   if (!card) return null;
@@ -2599,8 +2627,8 @@ async function checkInbox(manual) {
     const fresh = rows.filter(r => !known.has(r.id) && looseAmount(r.amount) > 0);
     if (!fresh.length) { if (manual) toast(rows.length ? 'Новых покупок нет' : 'Покупок пока нет — оплатите что-нибудь через Apple Pay'); return; }
     const items = fresh.map(r => {
-      const sub = tidyMerchant(r.merchant), g = guessFromHistory(sub);
-      return { ext: r.id, card: r.card || '', amount: looseAmount(r.amount), sub, to: g?.to || null,
+      const sub = merchantName(r.merchant), g = guessFromHistory(sub);
+      return { ext: r.id, card: r.card || '', raw: r.merchant || '', amount: looseAmount(r.amount), sub, to: g?.to || null,
         from: walletForCard(r.card) || g?.from || usualWallet(), date: ymd(new Date(r.created_at)) };
     });
     let note = '';
