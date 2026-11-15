@@ -58,7 +58,7 @@ const COLORS = ['#ef4444', '#f97316', '#f59e0b', '#eab308', '#84cc16', '#22c55e'
   '#d946ef', '#ec4899', '#f43f5e', '#a16207', '#78716c', '#64748b', '#334155'];
 
 const UI_ICONS = new Set(['plus', 'x', 'chevron-left', 'chevron-right', 'list', 'chart-pie', 'settings',
-  'arrow-down-wide-narrow', 'arrow-up-narrow-wide', 'arrow-right', 'trash-2', 'download', 'upload', 'check', 'search', 'arrow-down', 'mic', 'key-round', 'lightbulb']);
+  'arrow-down-wide-narrow', 'arrow-up-narrow-wide', 'arrow-right', 'trash-2', 'download', 'upload', 'check', 'search', 'arrow-down', 'mic', 'key-round', 'lightbulb', 'copy']);
 const PICKER_ICONS = Object.keys(ICONS).filter(n => !UI_ICONS.has(n));
 
 /* kinds: income source → wallet → category.
@@ -496,7 +496,8 @@ function debtStats() {
 }
 function debtsBlock() {
   const st = debtStats();
-  if (!st.in.length && !st.out.length) return '';
+  if (!st.in.length && !st.out.length) return `<div class="h2row"><h2>Долги</h2></div>
+    <button class="dep-add" data-act="debts" data-dir="in">${icon('plus')} Записать долг</button>`;
   const names = arr => arr.map(x => x.d.name).slice(0, 3).join(', ') + (arr.length > 3 ? '…' : '');
   const sq = (dir, title, sum, arr) => `<button class="dsq ${dir}" data-act="debts" data-dir="${dir}">
     <span class="dsq-t">${title}${icon('chevron-right')}</span>
@@ -2393,34 +2394,16 @@ async function parseSpendsAI(text) {
 }
 
 function openVoice(text = '') {
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  // iOS asks for the microphone on every launch of a home-screen app, so dictation goes through the keyboard's 🎤
   const sh = openSheet(`
     ${sheetHead('Записать траты')}
     <textarea id="v-text" class="vtext" rows="3" placeholder="кофе 1500 с каспи и такси 2000" enterkeyhint="done">${esc(text)}</textarea>
-    <div class="vhint">${SR ? 'Нажмите микрофон и говорите — или напишите текстом.' : 'Продиктуйте: нажмите 🎤 на клавиатуре iPhone. Можно и текстом.'}
+    <div class="vhint">Нажмите 🎤 на клавиатуре и продиктуйте — или напишите текстом.
       ${AI.key ? '' : '<br>Без ключа OpenAI разбираю сам — простые фразы вроде «обед 2500 с каспи». <button class="linkish" data-act="ai">Подключить ИИ</button>'}</div>
-    <div class="actions">
-      ${SR ? `<button class="btn" id="v-rec">${icon('mic')} Говорить</button>` : ''}
-      <button class="btn primary" id="v-go">${AI.key ? 'Разобрать с ИИ' : 'Разобрать'}</button>
-    </div>`);
+    <div class="actions"><button class="btn primary" id="v-go">${AI.key ? 'Разобрать с ИИ' : 'Разобрать'}</button></div>`);
   const ta = $('#v-text', sh);
-  if (!SR) setTimeout(() => ta.focus(), 300);
-  let rec = null;
-  $('#v-rec', sh)?.addEventListener('click', () => {
-    if (rec) { rec.stop(); return; }
-    rec = new SR();
-    rec.lang = 'ru-RU';
-    rec.interimResults = true;
-    rec.continuous = true;
-    const base = ta.value ? ta.value.trim() + ', ' : '';
-    rec.onresult = e => { ta.value = base + [...e.results].map(r => r[0].transcript).join(' '); };
-    rec.onend = () => { rec = null; $('#v-rec', sh) && ($('#v-rec', sh).innerHTML = `${icon('mic')} Говорить`); };
-    rec.onerror = () => toast('Микрофон недоступен — продиктуйте через клавиатуру');
-    rec.start();
-    $('#v-rec', sh).innerHTML = `<span class="rec-dot"></span> Стоп`;
-  });
+  setTimeout(() => ta.focus(), 300);
   $('#v-go', sh).onclick = async () => {
-    rec?.stop();
     const t = ta.value.trim();
     if (!t) return shake(ta);
     let items, note = '';
@@ -2438,7 +2421,8 @@ function openVoice(text = '') {
   };
 }
 
-function openVoiceReview(items, text, note = '') {
+// opts: title, back (false hides «Назад»), onSaved(recs) after the records are stored, onCancel when closed without saving
+function openVoiceReview(items, text, note = '', opts = {}) {
   if (!S.categories.length || !spendWallets().length) return toast('Нужны хотя бы один кошелёк и одна категория');
   const catOpts = it => `${it.newCat ? `<option value="new" selected>＋ ${esc(it.newCat)} (новая)</option>` : ''}
     ${it.to ? '' : it.newCat ? '' : '<option value="" selected disabled>Категория?</option>'}
@@ -2453,13 +2437,13 @@ function openVoiceReview(items, text, note = '') {
       <select class="v-cat ${it.to || it.newCat ? '' : 'need'}">${catOpts(it)}</select>
       <select class="v-w">${spendWallets().map(w => `<option value="${w.id}" ${w.id === it.from ? 'selected' : ''}>${esc(w.name)}</option>`).join('')}</select>
     </div>
-    ${it.date !== today() ? `<div class="v-date">${dayLabel(it.date)}</div>` : ''}
+    ${it.date !== today() || it.card ? `<div class="v-date">${[it.date !== today() ? dayLabel(it.date) : '', it.card ? esc(it.card) : ''].filter(Boolean).join(' · ')}</div>` : ''}
   </div>`;
   const sh = openSheet(`
-    ${sheetHead('Проверьте')}
+    ${sheetHead(opts.title || 'Проверьте')}
     ${note ? `<div class="vnote">${esc(note)}</div>` : ''}
     <div id="v-list">${items.map(row).join('')}</div>
-    <div class="actions"><button class="btn" id="v-back">Назад</button><button class="btn primary" id="v-save"></button></div>`);
+    <div class="actions">${opts.back === false ? '' : '<button class="btn" id="v-back">Назад</button>'}<button class="btn primary" id="v-save"></button></div>`);
   const total = () => {
     const rows = $$('.vrow', sh);
     const sum = rows.reduce((a, r) => a + (money($('.v-amt', r).value) || 0), 0);
@@ -2470,10 +2454,10 @@ function openVoiceReview(items, text, note = '') {
   sh.addEventListener('change', e => e.target.classList.contains('v-cat') && e.target.classList.remove('need'));
   sh.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.tagName === 'INPUT') e.target.blur(); });
   sh.addEventListener('click', e => { const d = e.target.closest('.v-del'); if (d) { d.closest('.vrow').remove(); total(); } });
-  $('#v-back', sh).onclick = () => openVoice(text);
+  $('#v-back', sh)?.addEventListener('click', () => openVoice(text));
   $('#v-save', sh).onclick = () => {
     const rows = $$('.vrow', sh);
-    if (!rows.length) return closeSheet();
+    if (!rows.length) { opts.onSaved?.([]); return closeSheet(); }
     const recs = [];
     for (const r of rows) {
       const it = items[+r.dataset.i], amount = money($('.v-amt', r).value), cat = $('.v-cat', r);
@@ -2498,7 +2482,10 @@ function openVoiceReview(items, text, note = '') {
         }
         x.to = created[name];
       }
-      S.tx.push({ id: uid(), type: 'expense', from: x.from, to: x.to, amount: x.amount, date: x.it.date, sub: x.sub, note: '', ts: Date.now() });
+      const t = { id: uid(), type: 'expense', from: x.from, to: x.to, amount: x.amount, date: x.it.date, sub: x.sub, note: '', ts: Date.now() };
+      if (x.it.ext) t.ext = x.it.ext; // Apple Pay inbox row id — never import it twice
+      if (x.it.card) t.card = x.it.card;
+      S.tx.push(t);
     }
     UI.bump = recs[recs.length - 1].to;
     // one tip is enough: the first purchase that has something worth saying
@@ -2507,6 +2494,7 @@ function openVoiceReview(items, text, note = '') {
     save();
     closeSheet();
     render();
+    opts.onSaved?.(recs);
     const sum = recs.reduce((a, x) => a + x.amount, 0);
     toast(`Записано ${recs.length} ${plural(recs.length, ['трата', 'траты', 'трат'])}: ${fmt(sum)}`, undo, true, tip);
   };
@@ -2536,6 +2524,167 @@ function openAISettings() {
 }
 
 /* =========================================================
+   Apple Pay: a Shortcuts automation drops each purchase into a Supabase table; the app takes them,
+   you confirm the categories, and they are deleted there. The project address, key and secret live
+   only on this phone, like the OpenAI key.
+   ========================================================= */
+const INBOX = {
+  get cfg() { try { return JSON.parse(localStorage.getItem('mt.inbox')) || {}; } catch (e) { return {}; } },
+  set cfg(v) { try { v ? localStorage.setItem('mt.inbox', JSON.stringify(v)) : localStorage.removeItem('mt.inbox'); } catch (e) { /* ignore */ } },
+  get ready() { const c = this.cfg; return !!(c.url && c.key && c.secret); },
+  base(c = this.cfg) { return c.url.trim().replace(/\/+$/, ''); },
+  async call(fn, body) {
+    const c = this.cfg;
+    let res;
+    try {
+      res = await fetch(`${this.base(c)}/rest/v1/rpc/${fn}`, {
+        method: 'POST',
+        headers: { apikey: c.key, Authorization: `Bearer ${c.key}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+    } catch (e) { throw new Error('Нет связи с Supabase'); }
+    if (res.status === 401 || res.status === 403) throw new Error('Supabase не принял ключ — проверьте его в настройках Apple Pay');
+    if (res.status === 404) throw new Error('В Supabase нет функций — выполните SQL из настроек Apple Pay');
+    if (!res.ok) throw new Error(`Supabase ответил ошибкой ${res.status}`);
+    const txt = await res.text();
+    return txt ? JSON.parse(txt) : null;
+  },
+  take() { return this.call('inbox_take', { p_secret: this.cfg.secret }); },
+  done(ids) { return ids.length ? this.call('inbox_done', { p_secret: this.cfg.secret, p_ids: ids }) : Promise.resolve(); },
+};
+const newSecret = () => [...crypto.getRandomValues(new Uint8Array(18))].map(b => b.toString(16).padStart(2, '0')).join('');
+
+// «1 500,00 ₸», «KZT 1,500.00», «1500» → 1500
+function looseAmount(v) {
+  let s = String(v ?? '').replace(/[^\d.,]/g, '');
+  if (!s) return NaN;
+  const sep = Math.max(s.lastIndexOf(','), s.lastIndexOf('.'));
+  s = sep >= 0 && s.length - sep - 1 <= 2 ? s.slice(0, sep).replace(/[.,]/g, '') + '.' + s.slice(sep + 1) : s.replace(/[.,]/g, '');
+  return Math.round(parseFloat(s) * 100) / 100;
+}
+// «MAGNUM CASH&CARRY» → «Magnum Cash&carry»; normal names stay as they are
+const tidyMerchant = m => {
+  m = String(m || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+  return /[a-zа-яё]/.test(m) ? m : m.toLowerCase().replace(/(^|[\s-])(\S)/g, (x, a, b) => a + b.toUpperCase());
+};
+// the wallet this card paid from last time, else one whose name appears in the card's name
+function walletForCard(card) {
+  if (!card) return null;
+  const last = sortTx(S.tx.filter(t => t.card === card && find('wallet', t.from) && !isDep(t.from)))[0];
+  if (last) return last.from;
+  const c = `${lowerRu(card)} ${toCyr(card)}`;
+  return spendWallets().find(w => walletStems(w).some(st => c.includes(st)))?.id || null;
+}
+
+async function aiCategorize(names) {
+  const r = await AI.json(
+    `Для каждого магазина или заведения подбери категорию расходов. Отвечай только JSON:
+{"items":[{"merchant":"как в запросе","category":"точное название из списка или null","new_category":"короткое название новой категории, только если ничего не подходит, иначе null"}]}
+Категории: ${S.categories.map(c => c.name).join(', ')}.`, names.join('\n'));
+  const out = {};
+  for (const x of Array.isArray(r?.items) ? r.items : []) out[lowerRu(x.merchant)] = x;
+  return out;
+}
+
+let inboxBusy = false;
+async function checkInbox(manual) {
+  if (!INBOX.ready || inboxBusy) return;
+  if (!manual && (!navigator.onLine || !sheetRoot.hidden || UI.tab !== 'home')) return; // never interrupt
+  inboxBusy = true;
+  try {
+    const rows = (await INBOX.take()) || [];
+    const known = new Set(S.tx.map(t => t.ext).filter(Boolean));
+    const stale = rows.filter(r => known.has(r.id)).map(r => r.id); // saved earlier, delete failed then
+    if (stale.length) INBOX.done(stale).catch(() => {});
+    const fresh = rows.filter(r => !known.has(r.id) && looseAmount(r.amount) > 0);
+    if (!fresh.length) { if (manual) toast(rows.length ? 'Новых покупок нет' : 'Покупок пока нет — оплатите что-нибудь через Apple Pay'); return; }
+    const items = fresh.map(r => {
+      const sub = tidyMerchant(r.merchant), g = guessFromHistory(sub);
+      return { ext: r.id, card: r.card || '', amount: looseAmount(r.amount), sub, to: g?.to || null,
+        from: walletForCard(r.card) || g?.from || usualWallet(), date: ymd(new Date(r.created_at)) };
+    });
+    let note = '';
+    const unknown = [...new Set(items.filter(it => !it.to && it.sub).map(it => it.sub))];
+    if (unknown.length && AI.key) {
+      try {
+        const ai = await aiCategorize(unknown);
+        for (const it of items) {
+          const x = !it.to && ai[lowerRu(it.sub)];
+          if (!x) continue;
+          const c = catByName(x.category || '');
+          if (c) it.to = c.id; else if (x.new_category) it.newCat = capFirst(String(x.new_category).trim().slice(0, 24));
+        }
+      } catch (e) { note = `${e.message}. Категории выберите сами.`; }
+    }
+    if (!manual && !sheetRoot.hidden) return; // something opened meanwhile — ask next time
+    const ids = fresh.map(r => r.id);
+    openVoiceReview(items, '', note, {
+      title: `Apple Pay · ${items.length} ${plural(items.length, ['покупка', 'покупки', 'покупок'])}`,
+      back: false,
+      // removed rows count as declined: they're deleted from Supabase too
+      onSaved: () => INBOX.done(ids).catch(() => toast('Сохранено, но Supabase не ответил — уберу записи в следующий раз')),
+    });
+  } catch (e) {
+    if (manual) toast(e.message);
+  } finally {
+    inboxBusy = false;
+  }
+}
+
+function copyText(text, what) {
+  navigator.clipboard?.writeText(text).then(() => toast(`${what} скопирован${/а$/.test(what) ? 'а' : ''}`), () => toast('Не удалось скопировать'));
+}
+
+function openApplePay() {
+  const c = INBOX.cfg;
+  const secret = c.secret || newSecret();
+  const sh = openSheet(`
+    ${sheetHead('Apple Pay')}
+    <p class="set-note" style="padding:0 0 8px">После каждой оплаты Apple Pay команда на iPhone отправляет сумму и магазин в ваш Supabase. Когда вы откроете «Деньги», покупки появятся на проверку — подтвердите категории, и записи в Supabase удалятся. Покупки через Kaspi QR сюда не попадают.</p>
+    <div class="label">1. Supabase</div>
+    <div class="set-card">
+      <div class="field"><span>Адрес проекта</span><input id="ap-url" placeholder="https://…supabase.co" value="${esc(c.url || '')}" autocomplete="off" autocapitalize="off" spellcheck="false" inputmode="url" enterkeyhint="done"></div>
+      <div class="field"><span>Публичный ключ</span><input id="ap-key" type="password" placeholder="${c.key ? '•••• сохранён' : 'anon public'}" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="done"></div>
+    </div>
+    <button class="btn add-bill" id="ap-sql">${icon('copy')} Скопировать SQL для Supabase</button>
+    <div class="label">2. Команда на iPhone</div>
+    <div class="set-card ap-copy">
+      <button type="button" data-copy="url"><span>URL</span><small>${c.url ? esc(INBOX.base({ url: c.url }) + '/rest/v1/applepay_inbox') : 'сначала адрес проекта'}</small>${icon('copy')}</button>
+      <button type="button" data-copy="key"><span>Ключ</span><small>${c.key ? 'для заголовков apikey и Authorization' : 'сначала ключ'}</small>${icon('copy')}</button>
+      <button type="button" data-copy="secret"><span>Секрет</span><small>${secret.slice(0, 6)}…${secret.slice(-4)}</small>${icon('copy')}</button>
+    </div>
+    <p class="set-note" style="padding:8px 0 0">Секрет — ваш личный пароль к этим записям. Он хранится только здесь и в команде.</p>
+    <div class="actions">
+      ${c.url ? `<button class="btn danger" id="ap-off">Отключить</button>` : ''}
+      <button class="btn primary" id="ap-save">Сохранить и проверить</button>
+    </div>`);
+  sh.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.tagName === 'INPUT') e.target.blur(); });
+  const read = () => ({ url: $('#ap-url', sh).value.trim(), key: $('#ap-key', sh).value.trim() || c.key || '', secret });
+  sh.addEventListener('click', e => {
+    const b = e.target.closest('[data-copy]');
+    if (!b) return;
+    const v = read();
+    if (b.dataset.copy === 'url') return v.url ? copyText(INBOX.base(v) + '/rest/v1/applepay_inbox', 'Адрес') : toast('Сначала вставьте адрес проекта');
+    if (b.dataset.copy === 'key') return v.key ? copyText(v.key, 'Ключ') : toast('Сначала вставьте ключ');
+    copyText(secret, 'Секрет');
+  });
+  // fetched up front: iOS only lets a page write to the clipboard right inside the tap
+  let sql = '';
+  fetch('supabase/applepay.sql').then(r => r.text()).then(t => (sql = t)).catch(() => {});
+  $('#ap-sql', sh).onclick = () => (sql ? copyText(sql, 'SQL') : toast('Нужен интернет, чтобы скопировать SQL'));
+  $('#ap-save', sh).onclick = () => {
+    const v = read();
+    if (!/^https:\/\/.+/.test(v.url)) return shake($('#ap-url', sh).closest('.field'));
+    if (!v.key) return shake($('#ap-key', sh).closest('.field'));
+    INBOX.cfg = v;
+    closeSheet();
+    render();
+    setTimeout(() => checkInbox(true), 350);
+  };
+  $('#ap-off', sh)?.addEventListener('click', () => { INBOX.cfg = null; closeSheet(); render(); toast('Apple Pay отключён'); });
+}
+
+/* =========================================================
    Settings
    ========================================================= */
 function renderSettings() {
@@ -2547,6 +2696,8 @@ function renderSettings() {
     <div class="set-list">
       <button class="set-row" data-act="plan">${icon('calendar')}План трат<small>${S.plan.on ? 'Зарплата ' + S.plan.paydays.join(' и ') : 'Выключен'}</small></button>
       <button class="set-row" data-act="quick-manage">${icon('zap')}Быстрые траты<small>${S.quick.length}</small></button>
+      <button class="set-row" data-act="bills">${icon('repeat')}Платежи и подписки<small>${S.plan.bills.length}</small></button>
+      <button class="set-row" data-act="applepay">${icon('credit-card')}Apple Pay<small>${INBOX.ready ? 'подключён' : 'выключен'}</small></button>
       <button class="set-row" data-act="ai">${icon('key-round')}ИИ (OpenAI)<small>${AI.key ? 'подключён' : 'нет ключа'}</small></button>
     </div>
     <div class="set-note">План показывает, сколько можно потратить сегодня, чтобы денег хватило до зарплаты.</div>
@@ -2584,7 +2735,7 @@ function renderSettings() {
     <div class="set-list">
       <button class="set-row danger" data-act="reset">${icon('trash-2')}Стереть все данные</button>
     </div>
-    <div class="set-note">Деньги · v2.3 · работает без интернета</div>`;
+    <div class="set-note">Деньги · v2.4 · работает без интернета</div>`;
 }
 
 async function exportData() {
@@ -2842,6 +2993,8 @@ const ACTIONS = {
   voice: () => { clearSel(); openVoice(); },
   story: el => { clearSel(); openStory(+el.dataset.i); },
   ai: () => openAISettings(),
+  applepay: () => openApplePay(),
+  bills: () => { openPlan(); setTimeout(() => $('.lrow', sheetRoot)?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 320); },
   reset: () => {
     if (!confirm('Стереть ВСЕ данные?\n\nСовет: сначала сохраните копию.')) return;
     const undo = snapshot();
@@ -2887,11 +3040,14 @@ $$('#tabbar button').forEach(b => {
 
 // Re-render when returning to the app on a new day
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && today() !== ymd(now)) location.reload();
+  if (document.visibilityState !== 'visible') return;
+  if (today() !== ymd(now)) return location.reload();
+  checkInbox();
 });
 
 render();
 checkSummary();
+setTimeout(checkInbox, 600); // Apple Pay purchases waiting in Supabase
 
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   navigator.serviceWorker.register('sw.js').catch(() => {});

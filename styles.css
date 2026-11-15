@@ -685,3 +685,10 @@ input, select { font: inherit; font-size: 16px; color: var(--text); }
 .ttip { display: flex; gap: 6px; align-items: flex-start; font-size: 13px; line-height: 1.35; opacity: .8; }
 .ttip .i { width: 15px; height: 15px; flex: none; margin-top: 1px; }
 #toast.has-tip { align-items: flex-start; }
+
+/* ---------- Apple Pay settings ---------- */
+.ap-copy { padding: 0; }
+.ap-copy button { display: flex; align-items: center; gap: 10px; width: 100%; padding: 13px 14px; border: 0; background: none; text-align: left; font-size: 15px; color: var(--text); }
+.ap-copy button + button { border-top: 1px solid var(--line); }
+.ap-copy small { flex: 1; min-width: 0; font-size: 12px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
+.ap-copy .i { width: 16px; height: 16px; color: var(--accent); }
