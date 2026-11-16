@@ -329,7 +329,7 @@ function periodLabel(P = UI.period) {
 
 function renderTopbar() {
   const tb = $('#topbar');
-  if (UI.tab === 'settings') { tb.innerHTML = '<h1>Настройки</h1>'; return; }
+  if (UI.tab === 'settings' || UI.tab === 'accounts') { tb.innerHTML = `<h1>${UI.tab === 'settings' ? 'Настройки' : 'Счета'}</h1>`; return; }
   const P = UI.period;
   const arrows = P.mode !== 'all';
   tb.innerHTML = `
@@ -347,7 +347,7 @@ function render() {
   renderTopbar();
   $$('#tabbar button').forEach(b => b.classList.toggle('active', b.dataset.tab === UI.tab));
   const top = view.scrollTop;
-  ({ home: renderHome, history: renderHistory, analytics: renderAnalytics, settings: renderSettings })[UI.tab]();
+  ({ home: renderHome, history: renderHistory, accounts: renderAccounts, analytics: renderAnalytics, settings: renderSettings })[UI.tab]();
   view.scrollTop = top;
 }
 
@@ -435,12 +435,40 @@ function renderHome() {
     <div class="grid">
       ${cats.map(c => catTile(c, s.exp[c.id] || 0, P.mode === 'month' ? c.budget : 0)).join('')}
       ${addTile('category')}
-    </div>
-    ${depositsBlock(bal)}
-    ${debtsBlock()}
-    ${loansBlock()}</div>`;
+    </div></div>`;
   UI.bump = null;
   countUp();
+  if (UI.sel) applySel();
+}
+
+/* =========================================================
+   Accounts: everything you have and owe — deposits, debts, installments — and the sum of it
+   ========================================================= */
+function renderAccounts() {
+  const bal = balances();
+  const cash = S.wallets.filter(w => !w.dep).reduce((a, w) => a + (bal[w.id] || 0), 0);
+  const saved = S.wallets.filter(w => w.dep).reduce((a, w) => a + (bal[w.id] || 0), 0);
+  const ds = debtStats();
+  const loans = activeLoans().reduce((a, l) => a + loanLeft(l), 0);
+  const owe = ds.sumOut + loans;
+  const total = cash + saved + ds.sumIn - owe;
+  // how the money on the accounts moved since the 1st (debts and installments aside)
+  const start = balances(`${ymOf(monthOf())}-01`);
+  const was = S.wallets.reduce((a, w) => a + (start[w.id] || 0), 0);
+  const moved = cash + saved - was;
+  const parts = [['cash', 'На картах и наличными', cash], ['saved', 'Накопления', saved], ['in', 'Тебе должны', ds.sumIn], ['owe', 'Ты должен и рассрочки', owe]].filter(x => x[2] > 0);
+  const sum = parts.reduce((a, x) => a + x[2], 0) || 1;
+  view.innerHTML = `
+    <section class="sec nw">
+      <div class="nw-label">Всего у тебя</div>
+      <div class="nw-big ${total < 0 ? 'neg' : ''}">${fmt0(total)}</div>
+      ${Math.abs(moved) >= 1 ? `<div class="nw-delta ${moved < 0 ? 'down' : ''}">${moved > 0 ? '+' : '−'}${fmt0(Math.abs(moved))} за ${MONTHS[now.getMonth()].toLowerCase()}</div>` : ''}
+      <div class="nw-bar">${parts.map(([k, , v]) => `<i class="${k}" style="flex:${v / sum}"></i>`).join('')}</div>
+      <div class="nw-rows">${parts.map(([k, n, v]) => `<div><i class="${k}"></i><span>${n}</span><b class="${k === 'owe' ? 'neg' : ''}">${k === 'owe' ? '−' : k === 'in' ? '+' : ''}${fmt0(v)}</b></div>`).join('')}</div>
+    </section>
+    ${depositsBlock(bal) || `<div class="h2row"><h2>Накопления</h2></div><button class="dep-add" data-act="new-dep">${icon('plus')} Новый депозит</button>`}
+    ${debtsBlock()}
+    ${loansBlock()}`;
   if (UI.sel) applySel();
 }
 
@@ -1193,7 +1221,8 @@ function openLoanForm(id) {
       <span class="hint" id="lf-bhint"></span></div>
     <div id="lf-inst">
       <div class="field"><span>Сумма покупки</span><input id="lf-total" inputmode="decimal" placeholder="0 ₸" value="${ex?.kind === 'inst' ? ex.total : ''}" enterkeyhint="done"></div>
-      <div class="field col"><span>Срок, месяцев</span><div class="mgrid" id="lf-months">${[3, 6, 12, 24].map(m => `<button type="button" data-m="${m}">${m}</button>`).join('')}<input id="lf-mo" inputmode="numeric" placeholder="другой" value="${[3, 6, 12, 24].includes(months) ? '' : months}"></div></div>
+      <div class="field"><span>Срок</span><div class="stepper"><button type="button" data-step="-1" aria-label="Меньше">−</button><b id="lf-mtxt"></b><button type="button" data-step="1" aria-label="Больше">+</button></div></div>
+      <div class="mchips">${[3, 6, 12, 24].map(m => `<button type="button" class="chip" data-m="${m}">${m}</button>`).join('')}</div>
       <div class="field"><span>Уже оплачено платежей</span><input id="lf-paid" inputmode="numeric" placeholder="0" value="${paidCount || ''}" enterkeyhint="done"></div>
     </div>
     <div id="lf-credit">
@@ -1213,12 +1242,13 @@ function openLoanForm(id) {
     $('#lf-inst', sh).hidden = kind !== 'inst';
     $('#lf-credit', sh).hidden = kind !== 'credit';
     $('#lf-name-l', sh).textContent = kind === 'inst' ? 'Что купил' : 'Название';
-    $('#lf-banks', sh).innerHTML = bankChips(bank);
+    $$('#lf-banks [data-b]', sh).forEach(x => x.classList.toggle('on', x.dataset.b === bank));
     $('#lf-newbank', sh).hidden = bank !== 'new';
     const b = findBank(bank);
     $('#lf-bhint', sh).textContent = b ? `Платёж спишется ${b.day}-го вместе с остальными «${b.name}».` : 'У нового банка нужен день платежа.';
-    const mo = +$('#lf-mo', sh).value || months;
-    $$('#lf-months button', sh).forEach(x => x.classList.toggle('on', +x.dataset.m === mo && !$('#lf-mo', sh).value));
+    const mo = months;
+    $('#lf-mtxt', sh).textContent = `${mo} мес`;
+    $$('.mchips [data-m]', sh).forEach(x => x.classList.toggle('on', +x.dataset.m === mo));
     if (kind === 'inst' && !payTouched && v('#lf-total') > 0) $('#lf-pay', sh).value = groupDigits(String(Math.round(v('#lf-total') / mo)));
     // summary
     const pay = v('#lf-pay');
@@ -1237,12 +1267,13 @@ function openLoanForm(id) {
   };
   paint();
   sh.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.tagName === 'INPUT') e.target.blur(); });
-  sh.addEventListener('input', e => { if (e.target.id === 'lf-pay') payTouched = true; if (e.target.id === 'lf-mo') months = +e.target.value || months; paint(); });
+  sh.addEventListener('input', e => { if (e.target.id === 'lf-pay') payTouched = true; paint(); });
   sh.addEventListener('change', paint);
   sh.addEventListener('click', e => {
     const k = e.target.closest('[data-k]'); if (k) { kind = k.dataset.k; return paint(); }
     const b = e.target.closest('[data-b]'); if (b) { bank = b.dataset.b; return paint(); }
-    const m = e.target.closest('[data-m]'); if (m) { months = +m.dataset.m; $('#lf-mo', sh).value = ''; payTouched = false; return paint(); }
+    const m = e.target.closest('[data-m]'); if (m) { months = +m.dataset.m; payTouched = false; return paint(); }
+    const st = e.target.closest('[data-step]'); if (st) { months = Math.min(120, Math.max(1, months + +st.dataset.step)); payTouched = false; return paint(); }
   });
   $('#lf-back', sh)?.addEventListener('click', openLoans);
   $('#lf-save', sh).onclick = () => {
@@ -1263,7 +1294,7 @@ function openLoanForm(id) {
     if (kind === 'inst') {
       const total = v('#lf-total');
       if (!(total > 0)) return shake($('#lf-total', sh).closest('.field'));
-      Object.assign(rec, { total, months: +$('#lf-mo', sh).value || months, paid0: Math.min(total, pay * (+$('#lf-paid', sh).value || 0)) });
+      Object.assign(rec, { total, months, paid0: Math.min(total, pay * (+$('#lf-paid', sh).value || 0)) });
     } else {
       const left = v('#lf-left');
       if (!(left > 0)) return shake($('#lf-left', sh).closest('.field'));
@@ -1668,6 +1699,8 @@ function clearSel() {
 
 function tapTile(el) {
   const { kind, id } = el.dataset;
+  // nothing to drag between on «Счета»: a tap opens the deposit
+  if (UI.tab === 'accounts') return openItem(kind, id);
   if (UI.dots.delete(id)) el.querySelector('.cdot')?.remove();
   const sel = UI.sel;
   if (sel) {
@@ -2138,7 +2171,7 @@ function openItem(kind, id, pre = {}) {
     ${kind === 'wallet' ? `<div class="seg kind-seg" id="i-kind"><button type="button" data-k="0">Кошелёк</button><button type="button" data-k="1">Депозит</button></div>` : ''}
     <div class="preview" id="pv"></div>
     ${ex && kind === 'wallet' ? `<button class="btn recon-btn" id="i-recon">${icon('landmark')} Сверить с банком${ex.checked ? `<small>последняя: ${dayLabel(ex.checked).toLowerCase()}</small>` : ''}</button>` : ''}
-    ${ex && it.dep ? `<button class="btn recon-btn" id="i-interest">${icon('percent')} Начислить проценты</button>` : ''}
+    ${ex && it.dep ? `<div class="actions dep-acts"><button class="btn" id="i-topup">${icon('plus')} Пополнить</button><button class="btn" id="i-interest">${icon('percent')} Проценты</button></div>` : ''}
     <div class="field"><span>Название</span><input id="i-name" maxlength="30" placeholder="${{ income: 'Зарплата', wallet: it.dep ? 'Halyk депозит' : 'Kaspi Gold', category: 'Продукты' }[kind]}" value="${esc(it.name)}" autocomplete="off" enterkeyhint="done"></div>
     ${kind === 'wallet' ? `<div class="field"><span>${ex ? 'Начальный баланс' : 'Сейчас на счёте'}</span><input id="i-initial" inputmode="decimal" placeholder="0" value="${it.initial || ''}" enterkeyhint="done"></div>
     <div class="dep-fields" id="i-dep">
@@ -2169,6 +2202,7 @@ function openItem(kind, id, pre = {}) {
   };
   paintKind();
   kindSeg?.addEventListener('click', e => { const b = e.target.closest('[data-k]'); if (b) { it.dep = !!+b.dataset.k; paintKind(); } });
+  $('#i-topup', sh)?.addEventListener('click', () => openTx({ type: 'transfer', from: usualWallet(), to: id }));
   $('#i-interest', sh)?.addEventListener('click', () => {
     let src = S.incomes.find(i => /процент/i.test(i.name));
     if (!src) { src = { id: uid(), name: 'Проценты', icon: 'percent', color: '#14b8a6' }; S.incomes.push(src); save(); }
@@ -3232,7 +3266,7 @@ function renderSettings() {
     <div class="set-list">
       <button class="set-row danger" data-act="reset">${icon('trash-2')}Стереть все данные</button>
     </div>
-    <div class="set-note">Деньги · v2.5 · работает без интернета</div>`;
+    <div class="set-note">Деньги · v2.6 · работает без интернета</div>`;
 }
 
 async function exportData() {
@@ -3534,7 +3568,7 @@ document.addEventListener('click', e => {
 
 // Tab icons
 $$('#tabbar button').forEach(b => {
-  b.querySelector('svg').outerHTML = icon({ home: 'house', history: 'list', analytics: 'chart-pie', settings: 'settings' }[b.dataset.tab]);
+  b.querySelector('svg').outerHTML = icon({ home: 'house', history: 'list', accounts: 'landmark', analytics: 'chart-pie', settings: 'settings' }[b.dataset.tab]);
 });
 
 // Re-render when returning to the app on a new day
@@ -3543,6 +3577,9 @@ document.addEventListener('visibilitychange', () => {
   if (today() !== ymd(now)) return location.reload();
   checkInbox();
 });
+
+// no pinch-zoom: iOS ignores user-scalable in some modes, so cancel the gesture itself
+document.addEventListener('gesturestart', e => e.preventDefault());
 
 render();
 checkSummary();
