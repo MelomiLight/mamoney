@@ -3116,26 +3116,50 @@ async function aiCategorize(names) {
   return out;
 }
 
+// small pill above the tab bar while Supabase is being asked, so a wait never looks like nothing happens
+let syncTimer;
+function syncPill(msg, busy) {
+  const p = $('#sync');
+  clearTimeout(syncTimer);
+  if (!msg) { p.hidden = true; return; }
+  p.innerHTML = `${busy ? '<span class="spin"></span>' : icon('cloud-off')}<span>${esc(msg)}</span>`;
+  p.hidden = false;
+  if (!busy) syncTimer = setTimeout(() => (p.hidden = true), 3000);
+}
+
+// When the purchase was made. The Shortcut sends paid_at, so a purchase queued offline keeps its own day;
+// older Shortcuts don't, then the time it reached Supabase is the best guess.
+const paidAt = r => { const d = new Date(r.paid_at || ''); return isNaN(d) ? new Date(r.created_at) : d; };
+// a queued purchase may be sent twice (the reply got lost, the Shortcut sent the queue again):
+// the same moment, sum and shop is the same purchase
+const rowKey = r => r.paid_at ? `ap:${r.paid_at}|${looseAmount(r.amount)}|${merchantKey(r.merchant)}` : r.id;
+
 let inboxBusy = false;
 async function checkInbox(manual) {
   if (!INBOX.ready || inboxBusy) return;
   if (!manual && (!navigator.onLine || !sheetRoot.hidden || UI.tab !== 'home')) return; // never interrupt
   inboxBusy = true;
+  syncPill('Проверяю покупки Apple Pay…', true);
   try {
     const rows = (await INBOX.take()) || [];
     const known = new Set(S.tx.map(t => t.ext).filter(Boolean));
-    const stale = rows.filter(r => known.has(r.id)).map(r => r.id); // saved earlier, delete failed then
+    const fresh = [], stale = [];
+    for (const r of rows) {
+      const k = rowKey(r);
+      if (known.has(k) || known.has(r.id)) stale.push(r.id); // saved earlier (delete failed then) or a resent copy
+      else { known.add(k); if (looseAmount(r.amount) > 0) fresh.push(r); }
+    }
     if (stale.length) INBOX.done(stale).catch(() => {});
-    const fresh = rows.filter(r => !known.has(r.id) && looseAmount(r.amount) > 0);
-    if (!fresh.length) { if (manual) toast(rows.length ? 'Новых покупок нет' : 'Покупок пока нет — оплатите что-нибудь через Apple Pay'); return; }
+    if (!fresh.length) { syncPill(); if (manual) toast(rows.length ? 'Новых покупок нет' : 'Покупок пока нет — оплатите что-нибудь через Apple Pay'); return; }
     const items = fresh.map(r => {
       const sub = merchantName(r.merchant), g = guessFromHistory(sub);
-      return { ext: r.id, card: r.card || '', raw: r.merchant || '', amount: looseAmount(r.amount), sub, to: g?.to || null,
-        from: walletForCard(r.card) || g?.from || usualWallet(), date: ymd(new Date(r.created_at)) };
+      return { ext: rowKey(r), card: r.card || '', raw: r.merchant || '', amount: looseAmount(r.amount), sub, to: g?.to || null,
+        from: walletForCard(r.card) || g?.from || usualWallet(), date: ymd(paidAt(r)) };
     });
     let note = '';
     const unknown = [...new Set(items.filter(it => !it.to && it.sub).map(it => it.sub))];
     if (unknown.length && AI.key) {
+      syncPill(`Нашёл ${items.length} ${plural(items.length, ['покупку', 'покупки', 'покупок'])}, подбираю категории…`, true);
       try {
         const ai = await aiCategorize(unknown);
         for (const it of items) {
@@ -3146,6 +3170,7 @@ async function checkInbox(manual) {
         }
       } catch (e) { note = `${e.message}. Категории выберите сами.`; }
     }
+    syncPill();
     if (!manual && !sheetRoot.hidden) return; // something opened meanwhile — ask next time
     const ids = fresh.map(r => r.id);
     openVoiceReview(items, '', note, {
@@ -3155,7 +3180,7 @@ async function checkInbox(manual) {
       onSaved: () => INBOX.done(ids).catch(() => toast('Сохранено, но Supabase не ответил — уберу записи в следующий раз')),
     });
   } catch (e) {
-    if (manual) toast(e.message);
+    if (manual) { syncPill(); toast(e.message); } else syncPill('Apple Pay: нет связи с Supabase, проверю позже');
   } finally {
     inboxBusy = false;
   }
@@ -3179,7 +3204,7 @@ function openApplePay() {
     <button class="btn add-bill" id="ap-sql">${icon('copy')} Скопировать SQL для Supabase</button>
     <div class="label">2. Команда на iPhone</div>
     <div class="set-card ap-copy">
-      <button type="button" data-copy="url"><span>URL</span><small>${c.url ? esc(INBOX.base({ url: c.url }) + '/rest/v1/applepay_inbox') : 'сначала адрес проекта'}</small>${icon('copy')}</button>
+      <button type="button" data-copy="url"><span>URL</span><small>${c.url ? esc(INBOX.base({ url: c.url }) + '/rest/v1/rpc/inbox_push') : 'сначала адрес проекта'}</small>${icon('copy')}</button>
       <button type="button" data-copy="key"><span>Ключ</span><small>${c.key ? 'для заголовков apikey и Authorization' : 'сначала ключ'}</small>${icon('copy')}</button>
       <button type="button" data-copy="secret"><span>Секрет</span><small>${secret.slice(0, 6)}…${secret.slice(-4)}</small>${icon('copy')}</button>
     </div>
@@ -3194,7 +3219,7 @@ function openApplePay() {
     const b = e.target.closest('[data-copy]');
     if (!b) return;
     const v = read();
-    if (b.dataset.copy === 'url') return v.url ? copyText(INBOX.base(v) + '/rest/v1/applepay_inbox', 'Адрес') : toast('Сначала вставьте адрес проекта');
+    if (b.dataset.copy === 'url') return v.url ? copyText(INBOX.base(v) + '/rest/v1/rpc/inbox_push', 'Адрес') : toast('Сначала вставьте адрес проекта');
     if (b.dataset.copy === 'key') return v.key ? copyText(v.key, 'Ключ') : toast('Сначала вставьте ключ');
     copyText(secret, 'Секрет');
   });
@@ -3266,7 +3291,7 @@ function renderSettings() {
     <div class="set-list">
       <button class="set-row danger" data-act="reset">${icon('trash-2')}Стереть все данные</button>
     </div>
-    <div class="set-note">Деньги · v2.6 · работает без интернета</div>`;
+    <div class="set-note">Деньги · v2.7 · работает без интернета</div>`;
 }
 
 async function exportData() {

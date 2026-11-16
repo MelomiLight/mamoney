@@ -301,6 +301,21 @@ input, select { font: inherit; font-size: 16px; color: var(--text); }
 #toast span { min-width: 0; }
 #toast .undo { border: 0; background: none; color: var(--accent); font-weight: 700; font-size: 15px; padding: 4px 2px 4px 10px; flex: none; }
 @keyframes rise { from { transform: translateY(10px); opacity: 0; } }
+#sync {
+  position: fixed; left: 50%; transform: translateX(-50%);
+  bottom: calc(72px + max(4px, calc(env(safe-area-inset-bottom) - 24px)));
+  z-index: 39; max-width: calc(100% - 32px);
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 14px; border-radius: 18px;
+  background: var(--surface); color: var(--text); border: 1px solid var(--line);
+  font-size: 13px; font-weight: 600; box-shadow: var(--shadow);
+  white-space: nowrap; animation: fade-in .2s ease;
+}
+#sync span:last-child { overflow: hidden; text-overflow: ellipsis; }
+#sync .i { width: 16px; height: 16px; color: var(--text-2); flex: none; }
+#sync .spin { width: 14px; height: 14px; flex: none; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; opacity: .7; animation: spin .7s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes fade-in { from { opacity: 0; } }
 
 /* ---------- quick spends ---------- */
 .quick { margin-bottom: 4px; }
