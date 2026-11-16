@@ -359,6 +359,7 @@ function setTab(tab) {
   UI.animate = tab === 'home';
   render();
   view.scrollTop = 0;
+  if (tab === 'home') checkInbox();
 }
 
 /* =========================================================
@@ -2963,7 +2964,7 @@ function openVoiceReview(items, text, note = '', opts = {}) {
     ${sheetHead(opts.title || 'Проверьте')}
     ${note ? `<div class="vnote">${esc(note)}</div>` : ''}
     <div id="v-list">${items.map(row).join('')}</div>
-    <div class="actions">${opts.back === false ? '' : '<button class="btn" id="v-back">Назад</button>'}<button class="btn primary" id="v-save"></button></div>`);
+    <div class="actions">${opts.onDecline ? '<button class="btn" id="v-skip">Не записывать</button>' : opts.back === false ? '' : '<button class="btn" id="v-back">Назад</button>'}<button class="btn primary" id="v-save"></button></div>`);
   const total = () => {
     const rows = $$('.vrow', sh);
     const sum = rows.reduce((a, r) => a + (money($('.v-amt', r).value) || 0), 0);
@@ -2973,7 +2974,16 @@ function openVoiceReview(items, text, note = '', opts = {}) {
   sh.addEventListener('input', total);
   sh.addEventListener('change', e => e.target.classList.contains('v-cat') && e.target.classList.remove('need'));
   sh.addEventListener('keydown', e => { if (e.key === 'Enter' && e.target.tagName === 'INPUT') e.target.blur(); });
-  sh.addEventListener('click', e => { const d = e.target.closest('.v-del'); if (d) { d.closest('.vrow').remove(); total(); } });
+  sh.addEventListener('click', e => {
+    const d = e.target.closest('.v-del');
+    if (!d) return;
+    const r = d.closest('.vrow');
+    opts.onRemove?.(items[+r.dataset.i]);
+    r.remove();
+    total();
+    if (opts.onDecline && !$$('.vrow', sh).length) closeSheet(); // nothing left to look at
+  });
+  $('#v-skip', sh)?.addEventListener('click', () => { opts.onDecline($$('.vrow', sh).map(r => items[+r.dataset.i])); closeSheet(); });
   $('#v-back', sh)?.addEventListener('click', () => openVoice(text));
   $('#v-save', sh).onclick = () => {
     const rows = $$('.vrow', sh);
@@ -3134,12 +3144,15 @@ const paidAt = r => { const d = new Date(r.paid_at || ''); return isNaN(d) ? new
 // the same moment, sum and shop is the same purchase
 const rowKey = r => r.paid_at ? `ap:${r.paid_at}|${looseAmount(r.amount)}|${merchantKey(r.merchant)}` : r.id;
 
-let inboxBusy = false;
-async function checkInbox(manual) {
+let inboxBusy = false, inboxAt = 0;
+// manual: from settings, says what happened. quiet: the background minute check, no pill unless something is found
+async function checkInbox(manual, quiet) {
   if (!INBOX.ready || inboxBusy) return;
   if (!manual && (!navigator.onLine || !sheetRoot.hidden || UI.tab !== 'home')) return; // never interrupt
+  if (!manual && Date.now() - inboxAt < 4000) return; // tab flipping back and forth
   inboxBusy = true;
-  syncPill('Проверяю покупки Apple Pay…', true);
+  inboxAt = Date.now();
+  if (!quiet) syncPill('Проверяю покупки Apple Pay…', true);
   try {
     const rows = (await INBOX.take()) || [];
     const known = new Set(S.tx.map(t => t.ext).filter(Boolean));
@@ -3153,7 +3166,7 @@ async function checkInbox(manual) {
     if (!fresh.length) { syncPill(); if (manual) toast(rows.length ? 'Новых покупок нет' : 'Покупок пока нет — оплатите что-нибудь через Apple Pay'); return; }
     const items = fresh.map(r => {
       const sub = merchantName(r.merchant), g = guessFromHistory(sub);
-      return { ext: rowKey(r), card: r.card || '', raw: r.merchant || '', amount: looseAmount(r.amount), sub, to: g?.to || null,
+      return { rid: r.id, ext: rowKey(r), card: r.card || '', raw: r.merchant || '', amount: looseAmount(r.amount), sub, to: g?.to || null,
         from: walletForCard(r.card) || g?.from || usualWallet(), date: ymd(paidAt(r)) };
     });
     let note = '';
@@ -3178,9 +3191,12 @@ async function checkInbox(manual) {
       back: false,
       // removed rows count as declined: they're deleted from Supabase too
       onSaved: () => INBOX.done(ids).catch(() => toast('Сохранено, но Supabase не ответил — уберу записи в следующий раз')),
+      // declined right in the list: gone from Supabase at once, so it never comes back
+      onRemove: it => INBOX.done([it.rid]).then(() => toast('Не записываю — удалено'), () => toast('Supabase не ответил — спрошу про эту покупку ещё раз')),
+      onDecline: left => INBOX.done(left.map(it => it.rid)).then(() => toast(`Не записываю — ${left.length > 1 ? 'удалены' : 'удалено'}`), () => toast('Supabase не ответил — спрошу ещё раз')),
     });
   } catch (e) {
-    if (manual) { syncPill(); toast(e.message); } else syncPill('Apple Pay: нет связи с Supabase, проверю позже');
+    if (manual) { syncPill(); toast(e.message); } else if (!quiet) syncPill('Apple Pay: нет связи с Supabase, проверю позже');
   } finally {
     inboxBusy = false;
   }
@@ -3291,7 +3307,7 @@ function renderSettings() {
     <div class="set-list">
       <button class="set-row danger" data-act="reset">${icon('trash-2')}Стереть все данные</button>
     </div>
-    <div class="set-note">Деньги · v2.7 · работает без интернета</div>`;
+    <div class="set-note">Деньги · v2.8 · работает без интернета</div>`;
 }
 
 async function exportData() {
@@ -3602,6 +3618,11 @@ document.addEventListener('visibilitychange', () => {
   if (today() !== ymd(now)) return location.reload();
   checkInbox();
 });
+// iOS doesn't always report a return from the app switcher as visibilitychange
+window.addEventListener('pageshow', () => checkInbox());
+window.addEventListener('focus', () => checkInbox());
+// and while the app stays open on the home screen, look again every minute
+setInterval(() => document.visibilityState === 'visible' && checkInbox(false, true), 60000);
 
 // no pinch-zoom: iOS ignores user-scalable in some modes, so cancel the gesture itself
 document.addEventListener('gesturestart', e => e.preventDefault());
